@@ -13,6 +13,8 @@ use futures_core::Stream;
 
 use crate::error::{ConnectError, RecvError, SendError};
 
+pub mod mem;
+
 /// A datagram channel to ONE peer; receiving is the [`Stream`] itself.
 ///
 /// Same contract as v1 for `send` (best-effort acceptance, no exposed

@@ -1,48 +1,21 @@
-//! In-memory pipe implementation of the v1 traits — the experiment bench
-//! and the embryo of fungi#2. Two crossed bounded `tokio::sync::mpsc`
-//! queues; capacity 1 by default so a slow transport is simulated for free.
+//! In-memory pipe for the v2 traits. Identical knobs to `v1::mem` (the
+//! types are shared); the read side is implemented as a hand-written
+//! `poll_next` — the cost being measured.
 
-use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::AtomicUsize;
+use std::task::{Context, Poll};
 
+use futures_core::Stream;
 use tokio::sync::mpsc;
 
 use crate::error::{ConnectError, RecvError, SendError};
-use crate::v1::{Channel, Connector, Listener};
+pub use crate::v1::mem::{Delivery, MemAddr, MemConfig};
+use crate::v2::{Channel, Connector, Listener};
+use std::future::Future;
 
-/// What `send` promises in this mock — the experiment's second axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Delivery {
-    /// `send` resolves once the message is in the peer's buffer; a dropped
-    /// peer yields [`SendError::Closed`] (mailbox-style positive confirmation).
-    #[default]
-    Confirmed,
-    /// `send` resolves once the transport accepted the message; loss (full
-    /// buffer, dead peer, injected drop) is silent — loss = infinite delay.
-    BestEffort,
-}
-
-/// Knobs for the in-memory pipe.
-#[derive(Debug, Clone, Default)]
-pub struct MemConfig {
-    /// Per-direction buffer capacity; `None` = 1 (slow transport).
-    pub capacity: Option<usize>,
-    /// Maximum message size; larger sends fail with [`SendError::TooLarge`].
-    pub max_msg_len: Option<usize>,
-    /// Artificial latency applied before each delivery.
-    pub latency: Option<Duration>,
-    /// Confirmed-mode sends give up with an error after this internal
-    /// deadline. The trait exposes no timeouts; this is
-    /// strictly transport-internal — the "with timeouts" half of the
-    /// send-semantics experiment.
-    pub send_timeout: Option<Duration>,
-    /// Delivery semantics of `send`.
-    pub delivery: Delivery,
-}
-
-/// One end of an in-memory duplex channel.
+/// One end of an in-memory duplex channel (v2: the end IS a stream).
 #[derive(Debug)]
 pub struct MemChannel {
     tx: mpsc::Sender<Vec<u8>>,
@@ -55,11 +28,11 @@ pub struct MemChannel {
 impl MemChannel {
     /// Silently drop the next `n` sends (best-effort loss injection).
     pub fn drop_next(&self, n: usize) {
-        self.drop_next.store(n, Ordering::SeqCst);
+        self.drop_next.store(n, std::sync::atomic::Ordering::SeqCst);
     }
     /// Fail the next `n` sends with [`SendError::Transport`].
     pub fn fail_next(&self, n: usize) {
-        self.fail_next.store(n, Ordering::SeqCst);
+        self.fail_next.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -78,10 +51,16 @@ pub fn duplex(cfg: MemConfig) -> (MemChannel, MemChannel) {
     (mk(tx_ab, rx_ba), mk(tx_ba, rx_ab))
 }
 
-pub(crate) fn take_one(counter: &AtomicUsize) -> bool {
-    counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
+impl Stream for MemChannel {
+    type Item = Result<Vec<u8>, RecvError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // NOTE for the comparison: latency injection on the read side would
+        // require storing a sleep future here; we inject latency on the
+        // send path instead (same observable effect) precisely because a
+        // hand-rolled poll state machine is what this variant costs.
+        self.rx.poll_recv(cx).map(|opt| opt.map(Ok))
+    }
 }
 
 impl Channel for MemChannel {
@@ -93,52 +72,34 @@ impl Channel for MemChannel {
             {
                 return Err(SendError::TooLarge { max });
             }
-            if take_one(&self.fail_next) {
+            if crate::v1::mem::take_one(&self.fail_next) {
                 return Err(SendError::Transport("injected failure".into()));
             }
             if let Some(latency) = self.cfg.latency {
                 tokio::time::sleep(latency).await;
             }
-            if take_one(&self.drop_next) {
-                return Ok(()); // injected silent loss
+            if crate::v1::mem::take_one(&self.drop_next) {
+                return Ok(());
             }
             match self.cfg.delivery {
                 Delivery::Confirmed => match self.cfg.send_timeout {
-                    Some(deadline) => {
-                        match tokio::time::timeout(deadline, self.tx.send(msg)).await {
-                            Ok(sent) => sent.map_err(|_| SendError::Closed),
-                            // Experiment note: dedicated Timeout variant vs
-                            // opaque Transport is decided in Task 13.
-                            Err(_) => Err(SendError::Transport("send timed out".into())),
-                        }
-                    }
+                    Some(deadline) => match tokio::time::timeout(deadline, self.tx.send(msg)).await
+                    {
+                        Ok(sent) => sent.map_err(|_| SendError::Closed),
+                        Err(_) => Err(SendError::Transport("send timed out".into())),
+                    },
                     None => self.tx.send(msg).await.map_err(|_| SendError::Closed),
                 },
                 Delivery::BestEffort => {
-                    let _ = self.tx.try_send(msg); // full or closed: silent loss
+                    let _ = self.tx.try_send(msg);
                     Ok(())
                 }
             }
         }
     }
-
-    #[allow(clippy::manual_async_fn)]
-    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
-        async move {
-            // tokio's mpsc recv is documented cancel-safe: no message is
-            // lost when this future is dropped mid-wait.
-            self.rx.recv().await.ok_or(RecvError::Closed)
-        }
-    }
 }
 
-/// Address of an in-memory listener. Only one endpoint exists per
-/// [`network`], so this is a unit marker.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemAddr;
-
-/// Connector half of an in-memory network: each `connect` produces a fresh
-/// channel pair, handing the far end to the paired [`MemListener`].
+/// Connector half of an in-memory network.
 #[derive(Debug)]
 pub struct MemConnector {
     cfg: MemConfig,
@@ -160,7 +121,6 @@ pub fn network(cfg: MemConfig) -> (MemConnector, MemListener) {
 impl Connector for MemConnector {
     type Addr = MemAddr;
     type Channel = MemChannel;
-
     fn connect(
         &self,
         _addr: &MemAddr,
@@ -179,7 +139,6 @@ impl Connector for MemConnector {
 
 impl Listener for MemListener {
     type Channel = MemChannel;
-
     #[allow(clippy::manual_async_fn)]
     fn accept(&mut self) -> impl Future<Output = Result<MemChannel, ConnectError>> + Send {
         async move { self.inbound.recv().await.ok_or(ConnectError::Unreachable) }
@@ -189,8 +148,8 @@ impl Listener for MemListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{RecvError, SendError};
-    use crate::v1::{Channel, Connector, Listener};
+    use crate::error::SendError;
+    use futures_util::StreamExt;
     use std::time::Duration;
 
     // CONFORMANCE (trait contract): everything sent arrives intact, both
@@ -204,10 +163,13 @@ mod tests {
         });
         a.send(b"m1").await.unwrap();
         a.send(b"m2").await.unwrap();
-        let got = [b.recv().await.unwrap(), b.recv().await.unwrap()];
+        let got = [
+            b.next().await.unwrap().unwrap(),
+            b.next().await.unwrap().unwrap(),
+        ];
         assert!(got.contains(&b"m1".to_vec()) && got.contains(&b"m2".to_vec()));
         b.send(b"reply").await.unwrap();
-        assert_eq!(a.recv().await.unwrap(), b"reply");
+        assert_eq!(a.next().await.unwrap().unwrap(), b"reply");
     }
 
     // MOCK-SPECIFIC (NOT part of the trait contract, NOT inherited by
@@ -221,8 +183,21 @@ mod tests {
         });
         a.send(b"m1").await.unwrap();
         a.send(b"m2").await.unwrap();
-        assert_eq!(b.recv().await.unwrap(), b"m1");
-        assert_eq!(b.recv().await.unwrap(), b"m2");
+        assert_eq!(b.next().await.unwrap().unwrap(), b"m1");
+        assert_eq!(b.next().await.unwrap().unwrap(), b"m2");
+    }
+
+    #[tokio::test]
+    async fn too_large_is_rejected() {
+        let cfg = MemConfig {
+            max_msg_len: Some(4),
+            ..MemConfig::default()
+        };
+        let (mut a, _b) = duplex(cfg);
+        assert!(matches!(
+            a.send(b"12345").await,
+            Err(SendError::TooLarge { max: 4 })
+        ));
     }
 
     // The "with timeouts" half of the send-semantics experiment: a full
@@ -240,26 +215,6 @@ mod tests {
         a.send(b"fills the buffer").await.unwrap();
         let err = a.send(b"no room").await;
         assert!(matches!(err, Err(SendError::Transport(_))));
-    }
-
-    #[tokio::test]
-    async fn too_large_is_rejected() {
-        let cfg = MemConfig {
-            max_msg_len: Some(4),
-            ..MemConfig::default()
-        };
-        let (mut a, _b) = duplex(cfg);
-        assert!(matches!(
-            a.send(b"12345").await,
-            Err(SendError::TooLarge { max: 4 })
-        ));
-    }
-
-    #[tokio::test]
-    async fn recv_after_peer_drop_is_closed() {
-        let (a, mut b) = duplex(MemConfig::default());
-        drop(a);
-        assert!(matches!(b.recv().await, Err(RecvError::Closed)));
     }
 
     #[tokio::test]
@@ -288,7 +243,7 @@ mod tests {
         a.drop_next(1);
         a.send(b"lost").await.unwrap(); // Ok, but silently dropped
         a.send(b"kept").await.unwrap();
-        assert_eq!(b.recv().await.unwrap(), b"kept");
+        assert_eq!(b.next().await.unwrap().unwrap(), b"kept");
     }
 
     #[tokio::test]
@@ -300,19 +255,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recv_is_cancel_safe() {
+    async fn stream_ends_after_peer_drop() {
+        let (a, mut b) = duplex(MemConfig::default());
+        drop(a);
+        assert!(b.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn next_is_cancel_safe() {
         let (mut a, mut b) = duplex(MemConfig::default());
-        // Poll-and-abandon recv 10 times; no message exists yet.
         for _ in 0..10 {
-            let poll = tokio::time::timeout(Duration::from_millis(5), b.recv()).await;
-            assert!(poll.is_err(), "should time out");
+            let poll = tokio::time::timeout(Duration::from_millis(5), b.next()).await;
+            assert!(poll.is_err());
         }
         a.send(b"m1").await.unwrap();
-        assert_eq!(
-            b.recv().await.unwrap(),
-            b"m1",
-            "no message lost to cancellation"
-        );
+        assert_eq!(b.next().await.unwrap().unwrap(), b"m1");
     }
 
     #[tokio::test]
@@ -322,7 +279,7 @@ mod tests {
         let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
         let (mut client, mut server) = (client.unwrap(), server.unwrap());
         client.send(b"hello").await.unwrap();
-        assert_eq!(server.recv().await.unwrap(), b"hello");
+        assert_eq!(server.next().await.unwrap().unwrap(), b"hello");
         // The server END dies for real (owned value dropped). The client
         // detects it — confirmed send errors — and reconnects through the
         // same connector: the full die → detect → reconnect cycle.
@@ -331,6 +288,6 @@ mod tests {
         let (c2, s2) = tokio::join!(connector.connect(&addr), listener.accept());
         let (mut c2, mut s2) = (c2.unwrap(), s2.unwrap());
         c2.send(b"again").await.unwrap();
-        assert_eq!(s2.recv().await.unwrap(), b"again");
+        assert_eq!(s2.next().await.unwrap().unwrap(), b"again");
     }
 }
