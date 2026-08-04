@@ -55,6 +55,8 @@ pub trait Listener: Send {
     fn accept(&mut self) -> impl Future<Output = Result<Self::Channel, ConnectError>> + Send;
 }
 
+pub mod mem;
+
 #[cfg(test)]
 mod tests {
     use super::*;
