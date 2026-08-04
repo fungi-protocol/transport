@@ -75,6 +75,8 @@ pub fn into_stream<C: Channel>(
     })
 }
 
+pub mod mem;
+
 #[cfg(test)]
 mod tests {
     use super::*;
