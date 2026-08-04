@@ -5,5 +5,6 @@
 //! no framing, no anonymity semantics — those belong to other layers.
 
 pub mod error;
+pub mod v1;
 
-pub use error::{BoxError, RecvError, SendError};
+pub use error::{BoxError, ConnectError, RecvError, SendError};

@@ -36,6 +36,16 @@ pub enum RecvError {
     Transport(BoxError),
 }
 
+/// Failure to establish a channel.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ConnectError {
+    /// The peer address could not be reached.
+    Unreachable,
+    /// Backend-specific failure, opaque to consumers.
+    Transport(BoxError),
+}
+
 impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -53,6 +63,15 @@ impl fmt::Display for RecvError {
         match self {
             RecvError::Closed => f.write_str("channel closed"),
             RecvError::Transport(e) => write!(f, "transport error: {e}"),
+        }
+    }
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnectError::Unreachable => f.write_str("peer unreachable"),
+            ConnectError::Transport(e) => write!(f, "transport error: {e}"),
         }
     }
 }
@@ -75,6 +94,15 @@ impl Error for RecvError {
     }
 }
 
+impl Error for ConnectError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ConnectError::Transport(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +115,7 @@ mod tests {
         );
         assert_eq!(SendError::Closed.to_string(), "channel closed");
         assert_eq!(RecvError::Closed.to_string(), "channel closed");
+        assert_eq!(ConnectError::Unreachable.to_string(), "peer unreachable");
     }
 
     #[test]
@@ -105,7 +134,8 @@ mod tests {
     fn transport_variant_preserves_source() {
         let send = SendError::Transport("backend exploded".into());
         let recv = RecvError::Transport("backend exploded".into());
-        for err in [&send as &dyn Error, &recv] {
+        let connect = ConnectError::Transport("backend exploded".into());
+        for err in [&send as &dyn Error, &recv, &connect] {
             let source = err.source().expect("has source");
             assert_eq!(source.to_string(), "backend exploded");
         }
