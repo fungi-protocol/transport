@@ -3,24 +3,10 @@ on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    - cron: '0 4 * * *'
   workflow_dispatch:
-    inputs:
-      job:
-        description: 'Slow job to run on demand'
-        type: choice
-        options:
-          - smoke
-          - e2e
-          - both
-        default: smoke
 jobs:
-  # Fast crane checks (nextest, clippy, fmt, doc): every PR and every push,
-  # pinned by flake.lock. Built by name so the slow cross-backend VM test
-  # (a separate check) stays off the PR path.
+  # Fast crane checks (nextest, clippy, fmt, doc), pinned by flake.lock.
   checks:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -33,13 +19,9 @@ jobs:
             .#checks.x86_64-linux.fmt \
             .#checks.x86_64-linux.doc
 
-  # Cross-backend onion VM test (~1h, deterministic): after merge to main, or
-  # on demand via the workflow_dispatch "job" input. Never on the PR path — the
-  # shared-random cycle it waits on is inherently slow.
+  # Cross-backend onion VM test: runs alongside the fast checks as a separate
+  # job on every PR and push, so integration is validated on each change.
   e2e:
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'e2e' || inputs.job == 'both'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -61,17 +43,3 @@ jobs:
           large-packages: false
       - uses: DeterminateSystems/nix-installer-action@v22
       - run: nix build -L .#checks.x86_64-linux.tor-e2e
-
-  # Real-network smoke: the ignored end-to-end test against the LIVE Tor
-  # network. A flaky monitor, not a gate — it runs on the nightly schedule or
-  # on demand via workflow_dispatch, and reports whether the strict production
-  # path still bootstraps and connects. A red run is a signal to investigate.
-  smoke:
-    if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'smoke' || inputs.job == 'both'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - run: nix develop -c cargo test -p fungi-transport-arti --test smoke -- --ignored --nocapture

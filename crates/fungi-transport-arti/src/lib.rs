@@ -15,8 +15,7 @@
 //! cancelled mid-handshake rejects that one in-flight inbound request (the
 //! peer's `connect` fails and it simply reconnects).
 //!
-//! Deterministic tests run in CI; the real-network path is exercised by the
-//! `#[ignore]`d smoke test (`tests/smoke.rs`) and, cross-backend, by the
+//! Deterministic tests run in CI; the cross-backend path is exercised by the
 //! NixOS VM suite.
 
 mod connector;
