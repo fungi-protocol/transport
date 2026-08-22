@@ -13,11 +13,11 @@
       {
       tor-e2e = pkgs.testers.runNixOSTest {
         name = "fungi-tor-e2e";
-        # The shared-random commit+reveal cycle needs ~55 min at 1-minute
-        # voting before both SRVs are published (the alignment the onion dial
-        # depends on); the default 3600s global timeout kills the run before
-        # the dial. Give the whole test script room to finish.
-        globalTimeout = 7200;
+        # The onion dial happens in the disaster-SRV window, before the first
+        # real shared-random value publishes, so the script finishes in minutes
+        # rather than waiting out the ~48-min commit+reveal cycle. Keep a margin
+        # over that so a stuck dial fails fast instead of hanging.
+        globalTimeout = 1800;
         nodes = let
           fingerprints = import ../tor-test-net/fingerprints.nix;
           torrc = import ../tor-test-net/torrc.nix { inherit fingerprints; };
@@ -115,18 +115,14 @@
               timeout=600,
           )
 
-          # Both shared-random values (previous AND current) must exist before
-          # onion work. With hsdir_interval aligned to the SRV period, the time
-          # period boundary sits mid-SRV-period, so the client needs the
-          # previous SRV for part of the period; until both are published, one
-          # side falls back to the disaster SRV and arti/C-tor pick different
-          # HSDirs (cross-impl 404). The previous value appears after two full
-          # commit+reveal runs (~48 voting rounds ~= 48 min at 1-minute voting).
-          da1.wait_until_succeeds(
-              "curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus "
-              "| grep -qE 'shared-rand-previous-value [1-9]'",
-              timeout=3600,
-          )
+          # No shared-random wait: on a fresh net, before the first real SRV
+          # publishes (~24 min at 1-minute voting), the consensus carries no
+          # SRV, so arti and C-tor both fall back to the *same* deterministic
+          # disaster SRV for this time period and compute the same HSDir ring.
+          # Dialing now, well inside that window, resolves the onion cross-impl
+          # in minutes. (Waiting until both real SRVs publish also works but
+          # costs ~48 min; the window between, where only the current SRV
+          # exists, is the cross-impl 404.)
 
           # Compose the arti private-net file from runtime relay identities.
           lines = []
