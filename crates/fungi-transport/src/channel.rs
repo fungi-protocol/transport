@@ -90,13 +90,18 @@ pub trait Listener: Send {
 pub struct ListenParams {
     /// The virtual port the onion service listens on.
     pub virt_port: u16,
-    /// Identity hint: a nickname (persistent identity, e.g. arti) or `None`
-    /// for an ephemeral identity (e.g. the SOCKS5h DiscardPK onion).
+    /// Identity hint, interpreted per backend. A backend with persistent
+    /// identities (arti) loads or creates the identity stored under this
+    /// nickname, falling back to a fixed default nickname when `None`. A
+    /// backend with only ephemeral identities (the SOCKS5h DiscardPK onion)
+    /// ignores the hint and publishes a fresh identity per listener. `None`
+    /// therefore does NOT guarantee an ephemeral identity.
     pub nickname: Option<String>,
 }
 
 impl ListenParams {
-    /// Parameters for an ephemeral listener on `virt_port`.
+    /// Parameters with no nickname hint on `virt_port` — the backend's
+    /// default identity (see [`ListenParams::nickname`]).
     pub fn new(virt_port: u16) -> Self {
         Self {
             virt_port,
@@ -104,7 +109,8 @@ impl ListenParams {
         }
     }
 
-    /// Attach a persistent-identity nickname.
+    /// Attach a nickname for backends with persistent identities; backends
+    /// without them ignore it (see [`ListenParams::nickname`]).
     pub fn with_nickname(mut self, nickname: impl Into<String>) -> Self {
         self.nickname = Some(nickname.into());
         self
