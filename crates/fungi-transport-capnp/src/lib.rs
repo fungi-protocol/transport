@@ -787,9 +787,11 @@ where
             .await
             .map_err(|_| ConnectError::Unreachable)?;
             let (listener_id, addr_text) = rx.await.map_err(|_| ConnectError::Unreachable)??;
-            let addr = addr_text
-                .parse()
-                .map_err(|_| ConnectError::Transport("unparseable listener address".into()))?;
+            let addr = addr_text.parse().map_err(|_| {
+                ConnectError::Transport(
+                    format!("unparseable listener address: {addr_text:?}").into(),
+                )
+            })?;
             Ok((
                 CapnpListener {
                     tx,
