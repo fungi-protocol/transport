@@ -25,6 +25,7 @@ tokio = { version = "1", features = [
     "time",
     "process",
 ] }
+proptest = "1"
 
 [lints]
 workspace = true

@@ -285,6 +285,60 @@ mod tests {
         assert_eq!(b.recv().await.unwrap(), [7u8; 8]);
     }
 
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("building the proptest runtime")
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Any sequence of within-limit messages survives framing intact
+            /// and in order (framing over one stream preserves order).
+            #[test]
+            fn arbitrary_messages_roundtrip(
+                msgs in proptest::collection::vec(
+                    proptest::collection::vec(any::<u8>(), 0..2048),
+                    1..8,
+                ),
+            ) {
+                rt().block_on(async {
+                    let (mut a, mut b) = framed_pair(2048);
+                    for msg in &msgs {
+                        a.send(msg).await.unwrap();
+                        assert_eq!(&b.recv().await.unwrap(), msg);
+                    }
+                });
+            }
+
+            /// Arbitrary bytes on the wire never panic the reader: every recv
+            /// yields a message within the limit or an error, and once it
+            /// errors the channel stays dead instead of hanging.
+            #[test]
+            fn arbitrary_garbage_never_panics(
+                bytes in proptest::collection::vec(any::<u8>(), 0..512),
+            ) {
+                rt().block_on(async {
+                    use tokio::io::AsyncWriteExt;
+                    let (mut raw, rx) = tokio::io::duplex(64 * 1024);
+                    let mut ch = FramedChannel::new(rx, 64);
+                    raw.write_all(&bytes).await.unwrap();
+                    drop(raw); // EOF bounds the loop: recv must terminate
+                    while let Ok(msg) = ch.recv().await {
+                        assert!(msg.len() <= 64);
+                    }
+                    assert!(ch.recv().await.is_err());
+                });
+            }
+        }
+    }
+
     /// Once the peer is gone, sends must map to `SendError::Closed`, not an
     /// opaque `Transport` error. A tokio duplex pipe surfaces BrokenPipe on
     /// a write to a dropped peer — sometimes only after it has buffered one

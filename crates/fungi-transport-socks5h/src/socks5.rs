@@ -167,6 +167,68 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// The 255-byte hostname guard fires before the proxy is ever dialed.
+    /// The proxy here is a bound listener that never answers, so only the
+    /// pre-I/O guard message can come back — had the code dialed, it would
+    /// have stalled in the handshake and produced a different error.
+    #[tokio::test]
+    async fn hostname_over_255_bytes_is_rejected_before_any_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let host = "a".repeat(256);
+        let err = connect(proxy, &host, 1)
+            .await
+            .expect_err("an overlong hostname must be rejected");
+        assert!(
+            err.to_string().contains("255-byte limit"),
+            "expected the pre-I/O guard error, got: {err}"
+        );
+        drop(listener);
+    }
+
+    mod properties {
+        use super::super::connect;
+        use super::serve_one;
+        use proptest::prelude::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        fn rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("building the proptest runtime")
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(16))]
+
+            /// The CONNECT encoding round-trips for any legal hostname up to
+            /// the 255-byte limit: the proxy sees exactly the requested host
+            /// and port, and the returned stream is the tunnel.
+            #[test]
+            fn handshake_roundtrips_any_legal_hostname(
+                host in "[a-z0-9.]{1,255}",
+                port in 1u16..,
+            ) {
+                rt().block_on(async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let proxy = listener.local_addr().unwrap();
+                    let served = host.clone();
+                    let server = tokio::spawn(async move {
+                        serve_one(listener, &served, port, 0x00).await;
+                    });
+                    let mut stream = connect(proxy, &host, port).await.unwrap();
+                    stream.write_all(&[0x42]).await.unwrap();
+                    let mut echoed = [0u8; 1];
+                    stream.read_exact(&mut echoed).await.unwrap();
+                    assert_eq!(echoed, [0x42]);
+                    server.await.unwrap();
+                });
+            }
+        }
+    }
+
     /// A reply whose VER byte isn't 0x05 is a malformed/mismatched proxy
     /// reply and must error before the reply code is even inspected —
     /// otherwise a garbled version byte could be misread as a valid code.
