@@ -59,11 +59,14 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
             "--plugin" => plugin = Some(it.next().ok_or("--plugin needs a path")?.into()),
             other if !other.starts_with("--") && target.is_none() => {
                 let (host, port) = other.rsplit_once(':').ok_or("target must be host:port")?;
-                target = Some(OnionAddr::new(
-                    host,
-                    port.parse()
-                        .map_err(|e: std::num::ParseIntError| e.to_string())?,
-                ));
+                target = Some(
+                    OnionAddr::new(
+                        host,
+                        port.parse()
+                            .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -248,7 +251,7 @@ mod tests {
                 "/tmp/private-net",
                 "--state-dir",
                 "/tmp/arti-dial",
-                "host.onion:9735",
+                &format!("{:a<56}.onion:9735", "host"),
             ]
             .map(String::from)
             .to_vec(),

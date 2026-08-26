@@ -73,7 +73,8 @@ mod tests {
     #[tokio::test]
     async fn connect_on_unbootstrapped_client_errors_deterministically() {
         let connector = unbootstrapped().connector();
-        let addr = fungi_transport::OnionAddr::new("nonexistent.onion", 1);
+        let addr =
+            fungi_transport::OnionAddr::new(format!("{:a<56}.onion", "nonexistent"), 1).unwrap();
         let fut = connector.connect(&addr);
         assert_send(fut);
         assert!(connector.connect(&addr).await.is_err());

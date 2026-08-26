@@ -205,6 +205,6 @@ mod tests {
         assert_send(t.connector());
         assert_send(t.listen(ListenParams::new(1)));
         let c = t.connector();
-        assert_send(c.connect(&OnionAddr::new("x.onion", 1)));
+        assert_send(c.connect(&OnionAddr::new(format!("{:a<56}.onion", "x"), 1).unwrap()));
     }
 }

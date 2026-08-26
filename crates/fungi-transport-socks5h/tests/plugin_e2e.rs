@@ -28,7 +28,11 @@ const PLUGIN: &str = env!("CARGO_BIN_EXE_fungi-socks5h-plugin");
 /// the ADD_ONION command (`...127.0.0.1:<port>`) over `port_tx` so the fake
 /// SOCKS proxy knows where to forward. Holds the connection open afterwards,
 /// so the onion service lives until the plugin drops it.
-async fn fake_control_once(listener: TcpListener, service_id: &str, port_tx: oneshot::Sender<u16>) {
+async fn fake_control_once(
+    listener: TcpListener,
+    service_id: String,
+    port_tx: oneshot::Sender<u16>,
+) {
     let (sock, _) = listener.accept().await.unwrap();
     let mut sock = BufReader::new(sock);
     let mut line = String::new();
@@ -102,7 +106,8 @@ async fn socks5h_plugin_roundtrip_through_fakes() {
     let proxy_addr = proxy.local_addr().unwrap();
 
     let (port_tx, port_rx) = oneshot::channel();
-    tokio::spawn(fake_control_once(control, "e2eplugin0service", port_tx));
+    let service_id = format!("{:a<56}", "e2epluginservice");
+    tokio::spawn(fake_control_once(control, service_id.clone(), port_tx));
     tokio::spawn(fake_socks_forwarding(proxy, port_rx));
 
     let mut command = tokio::process::Command::new(PLUGIN);
@@ -111,7 +116,7 @@ async fn socks5h_plugin_roundtrip_through_fakes() {
     let transport: CapnpTransport<OnionAddr> = connect_plugin(command);
 
     let (mut listener, onion) = transport.listen(ListenParams::new(9735)).await.unwrap();
-    assert_eq!(onion.host(), "e2eplugin0service.onion");
+    assert_eq!(onion.host(), format!("{service_id}.onion"));
 
     let connector = transport.connector();
     let (outbound, inbound) = tokio::join!(connector.connect(&onion), listener.accept());

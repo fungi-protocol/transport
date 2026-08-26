@@ -155,7 +155,8 @@ impl TorListener {
             .port();
         let service =
             control::create_onion(cfg.control_addr, &cfg.auth, virt_port, local_port).await?;
-        let addr = OnionAddr::new(format!("{}.onion", service.service_id), virt_port);
+        let addr = OnionAddr::new(format!("{}.onion", service.service_id), virt_port)
+            .map_err(|e| ConnectError::Transport(e.into()))?;
         Ok(Self {
             local,
             addr,
@@ -246,7 +247,7 @@ mod tests {
             socks_addr: proxy_addr,
             ..TorConfig::default()
         });
-        let addr = OnionAddr::new("peer.onion", 9735);
+        let addr = OnionAddr::new(format!("{}.onion", svc_id("peer")), 9735).unwrap();
         let mut ch = connector.connect(&addr).await.unwrap();
         ch.send(b"ping").await.unwrap();
         assert_eq!(ch.recv().await.unwrap(), b"ping");
@@ -260,7 +261,9 @@ mod tests {
             socks_addr: "127.0.0.1:1".parse().unwrap(),
             ..TorConfig::default()
         });
-        let err = connector.connect(&OnionAddr::new("x.onion", 1)).await;
+        let err = connector
+            .connect(&OnionAddr::new(format!("{}.onion", svc_id("x")), 1).unwrap())
+            .await;
         assert!(matches!(
             err,
             Err(fungi_transport::ConnectError::Transport(_))
@@ -270,9 +273,15 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;
 
+    /// A valid v3-form service id: a readable prefix padded to 56 base32
+    /// chars.
+    fn svc_id(prefix: &str) -> String {
+        format!("{prefix:a<56}")
+    }
+
     /// Fake control port good for one ADD_ONION (same protocol as the
     /// control.rs fakes; no byte assertions — control.rs owns those).
-    async fn fake_control_once(listener: TcpListener, service_id: &str) {
+    async fn fake_control_once(listener: TcpListener, service_id: String) {
         let (sock, _) = listener.accept().await.unwrap();
         let mut sock = BufReader::new(sock);
         let mut line = String::new();
@@ -292,14 +301,17 @@ mod tests {
     async fn listener_publishes_onion_and_accepts_framed_channels() {
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_addr = control.local_addr().unwrap();
-        tokio::spawn(fake_control_once(control, "fungiservicexyz"));
+        tokio::spawn(fake_control_once(control, svc_id("fungiservicexyz")));
 
         let cfg = TorConfig {
             control_addr,
             ..TorConfig::default()
         };
         let mut listener = TorListener::bind(&cfg, 9735).await.unwrap();
-        assert_eq!(listener.onion_addr().host(), "fungiservicexyz.onion");
+        assert_eq!(
+            listener.onion_addr().host(),
+            format!("{}.onion", svc_id("fungiservicexyz"))
+        );
         assert_eq!(listener.onion_addr().port(), 9735);
 
         // The fake daemon "forwards" an inbound connection: in reality tor
@@ -325,7 +337,7 @@ mod tests {
     async fn end_to_end_connector_to_listener_through_fakes() {
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_addr = control.local_addr().unwrap();
-        tokio::spawn(fake_control_once(control, "endtoendservice"));
+        tokio::spawn(fake_control_once(control, svc_id("endtoendservice")));
 
         let cfg = TorConfig {
             control_addr,
@@ -389,7 +401,7 @@ mod tests {
     async fn connect_use_drop_reconnect_through_fakes() {
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_addr = control.local_addr().unwrap();
-        tokio::spawn(fake_control_once(control, "reconnectservice"));
+        tokio::spawn(fake_control_once(control, svc_id("reconnectservice")));
 
         let cfg = TorConfig {
             control_addr,
@@ -416,14 +428,17 @@ mod tests {
 
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_addr = control.local_addr().unwrap();
-        tokio::spawn(fake_control_once(control, "transportservice"));
+        tokio::spawn(fake_control_once(control, svc_id("transportservice")));
 
         let transport = TorTransport::new(TorConfig {
             control_addr,
             ..TorConfig::default()
         });
         let (mut listener, onion) = transport.listen(ListenParams::new(9735)).await.unwrap();
-        assert_eq!(onion.host(), "transportservice.onion");
+        assert_eq!(
+            onion.host(),
+            format!("{}.onion", svc_id("transportservice"))
+        );
 
         let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy.local_addr().unwrap();

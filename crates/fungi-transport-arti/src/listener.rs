@@ -84,9 +84,11 @@ impl ArtiTransport {
         // logs by accident); we want the real address here, to hand to
         // peers out of band, so ask for the unredacted form explicitly.
         let host = hs_id.display_unredacted().to_string();
+        let addr =
+            OnionAddr::new(host, virt_port).map_err(|e| ConnectError::Transport(e.into()))?;
         Ok(ArtiListener {
             incoming: Box::pin(tor_hsservice::handle_rend_requests(rend_requests)),
-            addr: OnionAddr::new(host, virt_port),
+            addr,
             virt_port,
             max_msg_len: self.max_msg_len,
             _service: service,
