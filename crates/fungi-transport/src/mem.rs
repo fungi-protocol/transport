@@ -283,6 +283,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn too_large_is_recoverable() {
+        let cfg = MemConfig {
+            capacity: Some(2),
+            max_msg_len: Some(16),
+            ..MemConfig::default()
+        };
+        let (a, b) = duplex(cfg);
+        testkit::too_large_is_recoverable(a, b, 16).await;
+    }
+
+    #[tokio::test]
     async fn recv_after_peer_drop_is_closed() {
         let (a, b) = duplex(MemConfig::default());
         testkit::closed_after_peer_drop(a, b).await;

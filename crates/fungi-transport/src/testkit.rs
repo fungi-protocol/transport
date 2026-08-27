@@ -42,6 +42,21 @@ pub async fn too_large<C: Channel>(mut a: C, max: usize) {
     ));
 }
 
+/// `TooLarge` is a RECOVERABLE rejection: the oversized message never
+/// touches the wire, so the channel stays usable — the next within-limit
+/// send round-trips.
+pub async fn too_large_is_recoverable<C: Channel>(mut a: C, mut b: C, max: usize) {
+    let oversized = vec![0u8; max + 1];
+    assert!(matches!(
+        a.send(&oversized).await,
+        Err(SendError::TooLarge { .. })
+    ));
+    a.send(b"still alive")
+        .await
+        .expect("channel survives TooLarge");
+    assert_eq!(b.recv().await.unwrap(), b"still alive");
+}
+
 /// The connection-oriented lifecycle: connect, exchange a message, lose the
 /// peer for real, detect it, then RE-establish through the same connector.
 /// Only for [`Connector`]/[`Listener`] transports; message-based ones (a
