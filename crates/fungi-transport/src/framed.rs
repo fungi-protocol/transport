@@ -33,7 +33,8 @@ pub struct FramedChannel<S> {
     header_filled: usize,
     payload: Vec<u8>,
     payload_filled: usize,
-    // Set on protocol violation; every later recv returns Closed.
+    // Set on protocol violation or a write error (torn frame); every later
+    // send and recv returns Closed.
     poisoned: bool,
 }
 
@@ -88,17 +89,30 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin,
 {
     async fn send_inner(&mut self, msg: &[u8]) -> Result<(), SendError> {
+        if self.poisoned {
+            return Err(SendError::Closed);
+        }
         if msg.len() > self.max_msg_len {
             return Err(SendError::TooLarge {
                 max: self.max_msg_len,
             });
         }
-        // max_msg_len fits in u32 (checked in new), so msg.len() does too.
-        let prefix = (msg.len() as u32).to_be_bytes();
-        self.stream.write_all(&prefix).await.map_err(map_send_io)?;
-        self.stream.write_all(msg).await.map_err(map_send_io)?;
-        self.stream.flush().await.map_err(map_send_io)?;
-        Ok(())
+        // Any io error may leave a torn frame on the wire; poison so no
+        // later send writes a fresh frame over bytes the peer would
+        // misparse. (`TooLarge` above never touches the stream — the one
+        // recoverable send error.)
+        let result: Result<(), std::io::Error> = async {
+            // max_msg_len fits in u32 (checked in new), so msg.len() does too.
+            let prefix = (msg.len() as u32).to_be_bytes();
+            self.stream.write_all(&prefix).await?;
+            self.stream.write_all(msg).await?;
+            self.stream.flush().await
+        }
+        .await;
+        result.map_err(|e| {
+            self.poisoned = true;
+            map_send_io(e)
+        })
     }
 
     async fn recv_inner(&mut self) -> Result<Vec<u8>, RecvError> {
@@ -198,6 +212,85 @@ mod tests {
     async fn too_large_is_rejected() {
         let (a, _b) = framed_pair(16);
         testkit::too_large(a, 16).await;
+    }
+
+    #[tokio::test]
+    async fn too_large_is_recoverable() {
+        let (a, b) = framed_pair(16);
+        testkit::too_large_is_recoverable(a, b, 16).await;
+    }
+
+    /// AsyncRead/AsyncWrite double that injects exactly one write error once
+    /// `fail_at` total bytes have been written — an io failure mid-frame.
+    struct FailOnce {
+        inner: tokio::io::DuplexStream,
+        written: usize,
+        fail_at: usize,
+        failed: bool,
+    }
+
+    impl tokio::io::AsyncWrite for FailOnce {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if !self.failed && self.written + buf.len() > self.fail_at {
+                self.failed = true;
+                return std::task::Poll::Ready(Err(std::io::Error::other(
+                    "injected mid-frame failure",
+                )));
+            }
+            let n = std::task::ready!(std::pin::Pin::new(&mut self.inner).poll_write(cx, buf))?;
+            self.written += n;
+            std::task::Poll::Ready(Ok(n))
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    impl tokio::io::AsyncRead for FailOnce {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    /// An io error mid-frame leaves a torn frame on the wire; the channel
+    /// must refuse everything afterwards rather than write a fresh frame
+    /// over garbage the peer would misparse.
+    #[tokio::test]
+    async fn send_error_poisons_the_channel() {
+        use crate::error::SendError;
+        let (raw, _other) = tokio::io::duplex(64 * 1024);
+        let mut ch = FramedChannel::new(
+            FailOnce {
+                inner: raw,
+                written: 0,
+                fail_at: 6, // 4-byte prefix + 2 payload bytes: fails mid-payload
+                failed: false,
+            },
+            1024,
+        );
+        assert!(matches!(
+            ch.send(b"hello").await,
+            Err(SendError::Transport(_))
+        ));
+        assert!(matches!(ch.send(b"next").await, Err(SendError::Closed)));
+        assert!(matches!(ch.recv().await, Err(RecvError::Closed)));
     }
 
     #[tokio::test]
