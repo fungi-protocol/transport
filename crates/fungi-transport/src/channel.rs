@@ -24,10 +24,15 @@ use crate::error::{ConnectError, RecvError, SendError};
 ///   internally. Dropping the `recv` future before it resolves must not
 ///   lose any message (cancel safety).
 /// - `send` is NOT required to be cancel-safe: a `send` future dropped
-///   before resolving may or may not have transmitted the message.
-///   Consumers that cancel sends must treat the message state as unknown.
+///   before resolving may or may not have transmitted the message — treat
+///   the whole channel as dead after cancelling a send.
 /// - Messages have arbitrary size; a transport rejects oversized ones with
-///   [`SendError::TooLarge`].
+///   [`SendError::TooLarge`] — the one RECOVERABLE send error. Any `recv`
+///   error, and any other `send` error, means the channel is DEAD (see
+///   [`RecvError`]/[`SendError`]); recovery is a NEW channel via the
+///   [`Connector`], never this one.
+/// - No liveness detection: a silently dead path parks `recv` forever.
+///   Callers own timeouts, and any keepalive belongs to a higher layer.
 /// - No ordering guarantees — within or across channels, no deduplication.
 ///
 /// # Examples
@@ -62,8 +67,11 @@ pub trait Channel: Send {
 ///
 /// Message-based transports (e.g. an OHTTP mailbox) implement only
 /// [`Channel`]; connectors are how consumers RE-establish a channel after
-/// [`SendError::Closed`]/[`RecvError::Closed`]. Retry cadence is the
-/// caller's business, never the connector's.
+/// an error: `connect` again, on the SAME connector, and a fresh channel
+/// (a new circuit/stream) to the same address comes back — nothing
+/// carries over from the dead one, and the responder's identity is
+/// unchanged. Retry cadence is the caller's business, never the
+/// connector's.
 ///
 /// Opening contract: dialing is INITIATOR-anonymous — the transport
 /// presents no identity of this peer to the responder. The address is what

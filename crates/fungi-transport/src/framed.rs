@@ -8,7 +8,9 @@
 //! Cancel safety: all partial-frame state lives in [`FramedChannel`], not in
 //! the `recv` future, so a `recv` dropped mid-frame (e.g. by `select!`)
 //! resumes exactly where it stopped. `send` is NOT cancel safe: dropping a
-//! `send` future mid-write can leave a half-written frame on the stream.
+//! `send` future mid-write can leave a half-written frame on the stream —
+//! treat the channel as dead afterwards. A send that FAILS poisons the
+//! channel itself: later sends and recvs return `Closed`.
 
 use std::future::Future;
 

@@ -62,7 +62,10 @@ impl MemChannel {
     pub fn drop_next(&self, n: usize) {
         self.drop_next.store(n, Ordering::Relaxed);
     }
-    /// Fail the next `n` sends with [`SendError::Transport`].
+    /// Fail the next `n` sends with [`SendError::Transport`]. Mock-specific
+    /// tolerance: this pipe stays usable afterwards, but the contract says a
+    /// consumer must treat any non-`TooLarge` send error as a dead channel —
+    /// do not lean on the tolerance outside fault-injection tests.
     pub fn fail_next(&self, n: usize) {
         self.fail_next.store(n, Ordering::Relaxed);
     }

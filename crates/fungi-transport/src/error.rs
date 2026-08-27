@@ -11,6 +11,12 @@ use std::fmt;
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 /// Failure to send one message.
+///
+/// Taxonomy: [`TooLarge`](SendError::TooLarge) is RECOVERABLE — the message
+/// was rejected before touching the transport, and the channel remains
+/// usable. Every other send error means the channel must be treated as
+/// dead: recovery is a new channel through the
+/// [`Connector`](crate::Connector), never resurrection of this one.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SendError {
@@ -27,6 +33,13 @@ pub enum SendError {
 }
 
 /// Failure to receive the next message.
+///
+/// ANY receive error means the channel is dead; the variant is diagnostic,
+/// not semantic. Transports cannot uniformly tell a peer's clean departure
+/// from a path failure — a Tor stream's teardown, for one, surfaces as
+/// [`Transport`](RecvError::Transport) — so consumers must not branch on
+/// the variant for correctness: reconnect through the
+/// [`Connector`](crate::Connector) either way.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RecvError {
