@@ -6,7 +6,7 @@
 //! a dedicated actor OS thread running a `current_thread` runtime plus a
 //! [`LocalSet`](tokio::task::LocalSet), and the `Send` client handles proxy
 //! each trait call to it over a [`tokio::sync::mpsc`] command channel plus a
-//! [`oneshot`](tokio::sync::oneshot) reply. Because only a command and its
+//! [`oneshot`] reply. Because only a command and its
 //! reply — both `Send` — cross the trait boundary, the returned futures are
 //! `Send` while the capnp machinery stays confined to its thread.
 //!
@@ -14,7 +14,7 @@
 //! A single actor thread hosts one capnp-rpc connection and therefore the whole
 //! `!Send` capability graph reachable through it: the `Transport`, and every
 //! `Connector`/`Listener`/`Channel` derived from it. The actor keeps those
-//! capabilities in a [`Registry`] keyed by a small integer id; each client
+//! capabilities in a `Registry` keyed by a small integer id; each client
 //! handle ([`CapnpTransport`], [`CapnpConnector`], [`CapnpListener`],
 //! [`CapnpChannel`]) carries that id plus a clone of the command sender, and a
 //! command references its capability by id. Because every handle holds a sender

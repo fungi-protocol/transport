@@ -1,4 +1,4 @@
-//! Generic integration-driver primitives: drive a [`Channel`](crate::channel::Channel)
+//! Generic integration-driver primitives: drive a [`Channel`]
 //! peer through an echo loop or a fixed message sequence. Generic over the
 //! trait so the in-memory mock exercises them; real transports reuse them
 //! unchanged (the e2e binary, the capnp plugin harness).
@@ -17,8 +17,10 @@ fn sequence() -> Vec<Vec<u8>> {
 
 /// Echo every message from one accepted channel until the peer departs.
 /// The peer closing ends the loop cleanly, whether it surfaces as
-/// [`RecvError::Closed`] (a graceful EOF, as on a plain TCP/SOCKS stream) or as
-/// [`RecvError::Transport`]: a real Tor onion stream is torn down with an END
+/// [`RecvError::Closed`](crate::error::RecvError::Closed) (a graceful EOF, as
+/// on a plain TCP/SOCKS stream) or as
+/// [`RecvError::Transport`](crate::error::RecvError::Transport): a real Tor
+/// onion stream is torn down with an END
 /// cell, which the arti backend reports as a transport error (e.g. END reason
 /// MISC maps to `io::ErrorKind::Other`) rather than a clean EOF. Either way the
 /// peer is gone. Data correctness is the dialer's job ([`dial_sequence`] checks

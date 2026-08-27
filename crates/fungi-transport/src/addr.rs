@@ -70,7 +70,7 @@ impl std::error::Error for ParseOnionAddrError {}
 impl FromStr for OnionAddr {
     type Err = ParseOnionAddrError;
 
-    /// Parse the `host:port` text form (the inverse of [`Display`]): the
+    /// Parse the `host:port` text form (the inverse of [`Display`](fmt::Display)): the
     /// split takes the last colon, so the port is whatever follows the final
     /// `:`, and the host must have the v3 onion form. This lets an address
     /// survive a round trip across a text boundary such as capnp `Text`.
