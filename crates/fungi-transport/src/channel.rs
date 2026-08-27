@@ -64,9 +64,16 @@ pub trait Channel: Send {
 /// [`Channel`]; connectors are how consumers RE-establish a channel after
 /// [`SendError::Closed`]/[`RecvError::Closed`]. Retry cadence is the
 /// caller's business, never the connector's.
+///
+/// Opening contract: dialing is INITIATOR-anonymous — the transport
+/// presents no identity of this peer to the responder. The address is what
+/// authenticates the RESPONDER: an `Ok` channel talks to the holder of the
+/// identity the `Addr` names (for the Tor backends, the onion key), or to
+/// no one. How far each guarantee reaches is backend-specific; every
+/// backend crate documents its trust base.
 pub trait Connector: Send {
-    /// Transport-native peer address (e.g. an onion address), opaque to
-    /// consumers; obtained out of band.
+    /// Transport-native name of the responder's identity (e.g. an onion
+    /// address), opaque to consumers; obtained out of band.
     type Addr: Send + Sync;
     /// The channel type this connector produces.
     type Channel: Channel;
@@ -78,6 +85,12 @@ pub trait Connector: Send {
 }
 
 /// Accepts inbound channels, for connection-oriented transports.
+///
+/// Opening contract: inbound channels are anonymous. `accept` yields only
+/// the channel — deliberately: the listener learns nothing about who
+/// dialed, and implementations must not expose an initiator identity
+/// through any side channel. Attributing senders is a higher layer's
+/// business, built on top of these channels.
 pub trait Listener: Send {
     /// The channel type this listener produces.
     type Channel: Channel;
@@ -120,6 +133,35 @@ impl ListenParams {
 /// A transport factory: opens connectors and creates listeners (publishing an
 /// onion identity). Connection initiation and identity creation live here —
 /// the surface beyond the per-message [`Channel`].
+///
+/// The `Addr` returned by [`listen`](Transport::listen) is this peer's
+/// authenticatable identity: hand it to peers out of band, and whoever
+/// dials it reaches the holder of that identity (see [`Connector`]).
+///
+/// # Examples
+///
+/// The factory flow, using the in-memory transport: publish a listener,
+/// hand its address out, dial it. The dialer knows who it reached — the
+/// address authenticates the responder — while the accepted channel carries
+/// no identity of the dialer.
+///
+/// ```
+/// use fungi_transport::mem::{MemConfig, MemTransport};
+/// use fungi_transport::{Channel, Connector, ListenParams, Listener, Transport};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let transport = MemTransport::new(MemConfig::default());
+/// let (mut listener, addr) = transport.listen(ListenParams::new(9735)).await.unwrap();
+///
+/// let connector = transport.connector();
+/// let (dialed, accepted) = tokio::join!(connector.connect(&addr), listener.accept());
+/// let (mut dialed, mut accepted) = (dialed.unwrap(), accepted.unwrap());
+///
+/// dialed.send(b"hello").await.unwrap();
+/// assert_eq!(accepted.recv().await.unwrap(), b"hello");
+/// # }
+/// ```
 pub trait Transport: Send {
     /// Transport-native peer address, shared with the connector.
     type Addr: Send + Sync;

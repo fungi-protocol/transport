@@ -2,7 +2,10 @@
 //!
 //! A channel is a connection to ONE peer moving opaque byte messages, one
 //! message per call. No delivery ordering across channels, no deduplication,
-//! no framing, no anonymity semantics — those belong to other layers.
+//! no framing, no per-message anonymity semantics — those belong to other
+//! layers. The one identity contract this crate does own is at
+//! connection-opening: dialing is initiator-anonymous, and the address
+//! authenticates the responder (see [`Connector`] and [`Listener`]).
 //!
 //! The API is [`Channel`] (send/recv one connected peer), [`Connector`]
 //! (open new channels) and [`Listener`] (accept inbound ones), plus
