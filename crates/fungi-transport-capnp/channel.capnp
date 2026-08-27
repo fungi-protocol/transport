@@ -27,6 +27,10 @@ interface Listener {
 interface Transport {
   connector @0 () -> (connector :Connector);
   listen @1 (virtPort :UInt16, nickname :Text) -> (listener :Listener);
+  # A connector bound to a logical session (its id in text form), so streams
+  # of different sessions land on different circuits. Added after connector@0;
+  # a plugin built before this returns `unimplemented`.
+  connectorFor @2 (session :Text) -> (connector :Connector);
 }
 
 # Test-only hooks for driving a private network in conformance/e2e runs.

@@ -98,6 +98,15 @@ enum Command {
         transport_id: u64,
         reply: oneshot::Sender<u64>,
     },
+    /// `transport.connectorFor(session)` — store the new session-bound
+    /// connector, return its id. `reply` carries an error so a plugin that
+    /// predates the method (capnp `unimplemented`) surfaces as a
+    /// [`ConnectError`] rather than a hang.
+    ConnectorFor {
+        transport_id: u64,
+        session: String,
+        reply: oneshot::Sender<Result<u64, ConnectError>>,
+    },
     /// `transport.listen(..)` — store the new listener, return its id together
     /// with the published address text (from `listener.onionAddr()`).
     Listen {
@@ -275,6 +284,44 @@ where
                     reg.connectors.insert(id, connector);
                     let _ = reply.send(id);
                 }
+            }
+
+            Command::ConnectorFor {
+                transport_id,
+                session,
+                reply,
+            } => {
+                let transport = registry.borrow().transports.get(&transport_id).cloned();
+                let registry = registry.clone();
+                tokio::task::spawn_local(async move {
+                    let Some(transport) = transport else {
+                        let _ = reply.send(Err(ConnectError::Unreachable));
+                        return;
+                    };
+                    let mut request = transport.connector_for_request();
+                    request.get().set_session(session.as_str());
+                    // Await the response so an `unimplemented` from a plugin
+                    // without this method becomes an error, not a pipelined
+                    // capability that fails later.
+                    match request.send().promise.await {
+                        Ok(response) => match response.get().and_then(|r| r.get_connector()) {
+                            Ok(connector) => {
+                                let mut reg = registry.borrow_mut();
+                                let id = reg.alloc_id();
+                                reg.connectors.insert(id, connector);
+                                let _ = reply.send(Ok(id));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(ConnectError::Transport(e.into())));
+                            }
+                        },
+                        Err(e) => {
+                            let _ = reply.send(Err(ConnectError::Transport(
+                                format!("plugin without session support: {e}").into(),
+                            )));
+                        }
+                    }
+                });
             }
 
             Command::Listen {
@@ -771,14 +818,22 @@ where
             transport_id: self.transport_id,
             connector_id: tokio::sync::OnceCell::new(),
             max_msg_len: self.max_msg_len,
+            session: None,
             _addr: PhantomData,
         }
     }
 
-    fn connector_for(&self, _session: &fungi_transport::SessionId) -> CapnpConnector<A> {
-        // Carrying the session across the plugin boundary lands in a
-        // follow-up: this delegates to the shared connector for now.
-        self.connector()
+    fn connector_for(&self, session: &fungi_transport::SessionId) -> CapnpConnector<A> {
+        // The session id crosses to the plugin as text; the remote
+        // `connectorFor` binds it there.
+        CapnpConnector {
+            tx: self.tx.clone(),
+            transport_id: self.transport_id,
+            connector_id: tokio::sync::OnceCell::new(),
+            max_msg_len: self.max_msg_len,
+            session: Some(session.to_string()),
+            _addr: PhantomData,
+        }
     }
 
     fn listen(
@@ -825,23 +880,43 @@ pub struct CapnpConnector<A = MemAddr> {
     transport_id: u64,
     connector_id: tokio::sync::OnceCell<u64>,
     max_msg_len: usize,
+    /// The logical session this connector serves (text form), or `None` for
+    /// the transport's shared default connector.
+    session: Option<String>,
     _addr: PhantomData<fn() -> A>,
 }
 
 impl<A> CapnpConnector<A> {
-    /// Resolve (once) and return the remote connector's registry id.
+    /// Resolve (once) and return the remote connector's registry id, using
+    /// `connectorFor` when this connector is session-bound.
     async fn ensure_connector(&self) -> Result<u64, ConnectError> {
         self.connector_id
             .get_or_try_init(|| async {
-                let (reply, rx) = oneshot::channel();
-                self.tx
-                    .send(Command::Connector {
-                        transport_id: self.transport_id,
-                        reply,
-                    })
-                    .await
-                    .map_err(|_| ConnectError::Unreachable)?;
-                rx.await.map_err(|_| ConnectError::Unreachable)
+                match &self.session {
+                    None => {
+                        let (reply, rx) = oneshot::channel();
+                        self.tx
+                            .send(Command::Connector {
+                                transport_id: self.transport_id,
+                                reply,
+                            })
+                            .await
+                            .map_err(|_| ConnectError::Unreachable)?;
+                        rx.await.map_err(|_| ConnectError::Unreachable)
+                    }
+                    Some(session) => {
+                        let (reply, rx) = oneshot::channel();
+                        self.tx
+                            .send(Command::ConnectorFor {
+                                transport_id: self.transport_id,
+                                session: session.clone(),
+                                reply,
+                            })
+                            .await
+                            .map_err(|_| ConnectError::Unreachable)?;
+                        rx.await.map_err(|_| ConnectError::Unreachable)?
+                    }
+                }
             })
             .await
             .copied()
@@ -1213,6 +1288,22 @@ where
         mut results: transport::ConnectorResults,
     ) -> Promise<(), capnp::Error> {
         let connector = self.backend.connector();
+        let client: connector::Client = capnp_rpc::new_client(ConnectorServer {
+            connector: Rc::new(connector),
+        });
+        results.get().set_connector(client);
+        Promise::ok(())
+    }
+
+    fn connector_for(
+        &mut self,
+        params: transport::ConnectorForParams,
+        mut results: transport::ConnectorForResults,
+    ) -> Promise<(), capnp::Error> {
+        let session = pry!(pry!(pry!(params.get()).get_session()).to_str())
+            .parse::<fungi_transport::SessionId>()
+            .map_err(|e| capnp::Error::failed(e.to_string()));
+        let connector = self.backend.connector_for(&pry!(session));
         let client: connector::Client = capnp_rpc::new_client(ConnectorServer {
             connector: Rc::new(connector),
         });

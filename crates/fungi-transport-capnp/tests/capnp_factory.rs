@@ -66,6 +66,27 @@ async fn factory_roundtrip_over_capnp() {
     assert_eq!(client.recv().await.unwrap(), b"pong");
 }
 
+/// SESSION: a session-bound connector traverses `connectorFor` across capnp
+/// and dials end to end, exactly like the default connector — proving the
+/// session id crosses the plugin boundary and the remote method is wired.
+/// (The mem backend cannot show real circuit isolation; the socks5h/arti
+/// crates prove the credential/token derivation.)
+#[tokio::test]
+async fn connector_for_roundtrip_over_capnp() {
+    use fungi_transport::SessionId;
+
+    let transport = wire();
+    let connector = transport.connector_for(&SessionId::generate());
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+
+    assert_send(&connector);
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+
+    client.send(b"ping").await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), b"ping");
+}
+
 /// CONFORMANCE: run the connection-oriented lifecycle suite
 /// (connect → accept → roundtrip → drop → detect → reconnect → re-accept →
 /// roundtrip) through the whole capnp graph. `MemTransport::listen` is
