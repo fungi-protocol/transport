@@ -62,15 +62,41 @@ impl Default for TorConfig {
 }
 
 /// Opens channels to `.onion` peers through the daemon's SOCKS5h proxy.
+///
+/// A connector bound to a session (via
+/// [`Transport::connector_for`](fungi_transport::Transport::connector_for))
+/// dials with a SOCKS credential derived from the session id, so the daemon
+/// isolates its circuits from other sessions'. The default connector carries
+/// none.
 #[derive(Debug)]
 pub struct TorConnector {
     cfg: TorConfig,
+    /// SOCKS username for circuit isolation; `None` uses no-auth.
+    credential: Option<String>,
 }
 
 impl TorConnector {
-    /// A connector talking to the daemon described by `cfg`.
+    /// A connector talking to the daemon described by `cfg`, on the shared
+    /// default circuits (no isolation credential).
     pub fn new(cfg: TorConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            credential: None,
+        }
+    }
+
+    /// A connector whose streams carry `credential` as the SOCKS username,
+    /// isolating them onto their own circuits.
+    pub fn with_credential(cfg: TorConfig, credential: String) -> Self {
+        Self {
+            cfg,
+            credential: Some(credential),
+        }
+    }
+
+    #[cfg(test)]
+    fn credential(&self) -> Option<&str> {
+        self.credential.as_deref()
     }
 }
 
@@ -86,8 +112,9 @@ impl Connector for TorConnector {
         let max = self.cfg.max_msg_len;
         let host = addr.host().to_owned();
         let port = addr.port();
+        let credential = self.credential.clone();
         async move {
-            let stream = socks5::connect(socks_addr, &host, port).await?;
+            let stream = socks5::connect(socks_addr, &host, port, credential.as_deref()).await?;
             Ok(FramedChannel::new(stream, max))
         }
     }
@@ -116,10 +143,10 @@ impl Transport for TorTransport {
         TorConnector::new(self.cfg.clone())
     }
 
-    fn connector_for(&self, _session: &fungi_transport::SessionId) -> TorConnector {
-        // Session isolation lands in a follow-up: this delegates to the
-        // shared connector for now.
-        TorConnector::new(self.cfg.clone())
+    fn connector_for(&self, session: &fungi_transport::SessionId) -> TorConnector {
+        // The session id's text form becomes the SOCKS username, so the
+        // daemon (IsolateSOCKSAuth) gives this session its own circuits.
+        TorConnector::with_credential(self.cfg.clone(), session.to_string())
     }
 
     fn listen(
@@ -466,5 +493,26 @@ mod tests {
         let (outbound, inbound) = tokio::join!(connector.connect(&onion), listener.accept());
         fungi_transport::testkit::roundtrip_both_directions(outbound.unwrap(), inbound.unwrap())
             .await;
+    }
+
+    /// `connector_for` derives the isolation credential from the session:
+    /// distinct sessions get distinct usernames (distinct circuits), the same
+    /// session gets the same one, and the default connector carries none.
+    #[test]
+    fn per_session_connectors_derive_distinct_credentials() {
+        use fungi_transport::{SessionId, Transport};
+        let transport = TorTransport::new(TorConfig::default());
+        assert_eq!(transport.connector().credential(), None);
+
+        let (s1, s2) = (SessionId::generate(), SessionId::generate());
+        let c1 = transport.connector_for(&s1);
+        let c2 = transport.connector_for(&s2);
+        assert_eq!(c1.credential(), Some(s1.to_string().as_str()));
+        assert_ne!(c1.credential(), c2.credential());
+        assert_eq!(
+            transport.connector_for(&s1).credential(),
+            c1.credential(),
+            "same session, same credential"
+        );
     }
 }

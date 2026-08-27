@@ -13,12 +13,48 @@ fn io_err(e: std::io::Error) -> ConnectError {
     ConnectError::Transport(e.into())
 }
 
+/// RFC 1929 username/password subnegotiation. The username carries the
+/// isolation credential (bounded to 255 bytes by the session id's short text
+/// form); the password is a fixed placeholder — tor isolates on the pair, and
+/// varying the username alone already separates circuits.
+async fn authenticate(stream: &mut TcpStream, username: &str) -> Result<(), ConnectError> {
+    let user = username.as_bytes();
+    if user.len() > 255 {
+        return Err(ConnectError::Transport(
+            "SOCKS5 username longer than the 255-byte limit".into(),
+        ));
+    }
+    // VER(0x01), ULEN, uname, PLEN(0), no password bytes.
+    let mut req = Vec::with_capacity(3 + user.len());
+    req.extend_from_slice(&[0x01, user.len() as u8]);
+    req.extend_from_slice(user);
+    req.push(0x00);
+    stream.write_all(&req).await.map_err(io_err)?;
+
+    let mut reply = [0u8; 2];
+    stream.read_exact(&mut reply).await.map_err(io_err)?;
+    // Subnegotiation version is 0x01; status 0x00 is success.
+    if reply[0] != 0x01 || reply[1] != 0x00 {
+        return Err(ConnectError::Transport(
+            "SOCKS5 username/password auth rejected".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Open a TCP stream to `host:port` through the SOCKS5 proxy at `proxy`.
 /// The hostname travels to the proxy unresolved (SOCKS5h).
+///
+/// `credential`, when set, drives username/password auth (RFC 1929) with that
+/// username (and a fixed password). Its only purpose is circuit isolation:
+/// tor's `IsolateSOCKSAuth` (on by default) gives streams with distinct SOCKS
+/// credentials distinct circuits. `None` uses no-auth, sharing the daemon's
+/// default circuits.
 pub(crate) async fn connect(
     proxy: SocketAddr,
     host: &str,
     port: u16,
+    credential: Option<&str>,
 ) -> Result<TcpStream, ConnectError> {
     let host_bytes = host.as_bytes();
     if host_bytes.len() > 255 {
@@ -28,17 +64,28 @@ pub(crate) async fn connect(
     }
     let mut stream = TcpStream::connect(proxy).await.map_err(io_err)?;
 
-    // Greeting: version 5, one auth method, 0x00 = no authentication.
-    stream
-        .write_all(&[0x05, 0x01, 0x00])
-        .await
-        .map_err(io_err)?;
+    // Greeting: offer no-auth, plus username/password (0x02) when a credential
+    // is present so the daemon can pick it for isolation.
+    match credential {
+        None => stream.write_all(&[0x05, 0x01, 0x00]).await,
+        Some(_) => stream.write_all(&[0x05, 0x02, 0x00, 0x02]).await,
+    }
+    .map_err(io_err)?;
     let mut chosen = [0u8; 2];
     stream.read_exact(&mut chosen).await.map_err(io_err)?;
-    if chosen != [0x05, 0x00] {
+    if chosen[0] != 0x05 {
         return Err(ConnectError::Transport(
-            "SOCKS5 proxy refused no-auth method".into(),
+            "SOCKS5 greeting reply with wrong version byte".into(),
         ));
+    }
+    match chosen[1] {
+        0x00 => {} // no-auth selected: nothing more to do
+        0x02 => authenticate(&mut stream, credential.unwrap_or_default()).await?,
+        _ => {
+            return Err(ConnectError::Transport(
+                "SOCKS5 proxy selected no acceptable auth method".into(),
+            ));
+        }
     }
 
     // CONNECT request: ATYP 0x03 (domain name), then len-prefixed name.
@@ -132,12 +179,78 @@ mod tests {
         }
     }
 
+    /// Serve one SOCKS5 connection that REQUIRES username/password: assert the
+    /// greeting offers method 0x02, select it, read the RFC 1929
+    /// subnegotiation and hand the username back to the caller over `user_tx`,
+    /// then complete a CONNECT for `host:port`.
+    async fn serve_one_authed(
+        listener: TcpListener,
+        host: &str,
+        port: u16,
+        user_tx: tokio::sync::oneshot::Sender<String>,
+    ) {
+        let (mut s, _) = listener.accept().await.unwrap();
+        // Greeting: VER, NMETHODS, then the methods.
+        let mut head = [0u8; 2];
+        s.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], 0x05);
+        let mut methods = vec![0u8; head[1] as usize];
+        s.read_exact(&mut methods).await.unwrap();
+        assert!(
+            methods.contains(&0x02),
+            "client must offer username/password auth: {methods:?}"
+        );
+        s.write_all(&[0x05, 0x02]).await.unwrap(); // select username/password
+
+        // RFC 1929: VER(0x01), ULEN, uname, PLEN, passwd.
+        let mut vu = [0u8; 2];
+        s.read_exact(&mut vu).await.unwrap();
+        assert_eq!(vu[0], 0x01, "auth subnegotiation version");
+        let mut uname = vec![0u8; vu[1] as usize];
+        s.read_exact(&mut uname).await.unwrap();
+        let mut plen = [0u8; 1];
+        s.read_exact(&mut plen).await.unwrap();
+        let mut passwd = vec![0u8; plen[0] as usize];
+        s.read_exact(&mut passwd).await.unwrap();
+        s.write_all(&[0x01, 0x00]).await.unwrap(); // auth success
+        user_tx.send(String::from_utf8(uname).unwrap()).unwrap();
+
+        // CONNECT.
+        let mut req = [0u8; 5];
+        s.read_exact(&mut req).await.unwrap();
+        assert_eq!(&req[..4], &[0x05, 0x01, 0x00, 0x03]);
+        let mut name = vec![0u8; req[4] as usize];
+        s.read_exact(&mut name).await.unwrap();
+        assert_eq!(name, host.as_bytes());
+        let mut p = [0u8; 2];
+        s.read_exact(&mut p).await.unwrap();
+        assert_eq!(u16::from_be_bytes(p), port);
+        s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+    }
+
+    /// A credential drives RFC 1929 auth and arrives at the proxy verbatim as
+    /// the username — the isolation identity the daemon separates circuits on.
+    #[tokio::test]
+    async fn credential_is_sent_as_the_socks_username() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let (user_tx, user_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_one_authed(listener, "peer.onion", 9735, user_tx));
+        connect(proxy, "peer.onion", 9735, Some("1234-7"))
+            .await
+            .unwrap();
+        assert_eq!(user_rx.await.unwrap(), "1234-7");
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn connect_success_yields_the_tunnel_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap();
         let server = tokio::spawn(serve_one(listener, "abcdefghijklmnop.onion", 9735, 0x00));
-        let mut stream = connect(proxy, "abcdefghijklmnop.onion", 9735)
+        let mut stream = connect(proxy, "abcdefghijklmnop.onion", 9735, None)
             .await
             .unwrap();
         stream.write_all(&[0x42]).await.unwrap();
@@ -152,7 +265,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap();
         let server = tokio::spawn(serve_one(listener, "dead.onion", 1, 0x04));
-        let err = connect(proxy, "dead.onion", 1).await;
+        let err = connect(proxy, "dead.onion", 1, None).await;
         assert!(matches!(err, Err(ConnectError::Unreachable)));
         server.await.unwrap();
     }
@@ -162,7 +275,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap();
         let server = tokio::spawn(serve_one(listener, "sad.onion", 1, 0x01));
-        let err = connect(proxy, "sad.onion", 1).await;
+        let err = connect(proxy, "sad.onion", 1, None).await;
         assert!(matches!(err, Err(ConnectError::Transport(_))));
         server.await.unwrap();
     }
@@ -176,7 +289,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap();
         let host = "a".repeat(256);
-        let err = connect(proxy, &host, 1)
+        let err = connect(proxy, &host, 1, None)
             .await
             .expect_err("an overlong hostname must be rejected");
         assert!(
@@ -218,7 +331,7 @@ mod tests {
                     let server = tokio::spawn(async move {
                         serve_one(listener, &served, port, 0x00).await;
                     });
-                    let mut stream = connect(proxy, &host, port).await.unwrap();
+                    let mut stream = connect(proxy, &host, port, None).await.unwrap();
                     stream.write_all(&[0x42]).await.unwrap();
                     let mut echoed = [0u8; 1];
                     stream.read_exact(&mut echoed).await.unwrap();
@@ -252,7 +365,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let err = connect(proxy, "wrongver.onion", 1).await;
+        let err = connect(proxy, "wrongver.onion", 1, None).await;
         assert!(matches!(err, Err(ConnectError::Transport(_))));
         server.await.unwrap();
     }
