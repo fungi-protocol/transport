@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use arti_client::{DataStream, TorClient};
+use arti_client::{DataStream, IsolationToken, StreamPrefs, TorClient};
 use fungi_transport::framed::FramedChannel;
 use fungi_transport::{ConnectError, Connector, OnionAddr};
 use tor_rtcompat::PreferredRuntime;
@@ -15,6 +15,10 @@ use crate::error::connect_error;
 pub struct ArtiConnector {
     pub(crate) client: std::sync::Arc<TorClient<PreferredRuntime>>,
     pub(crate) max_msg_len: usize,
+    /// Isolation token for this session; `None` shares the client's default
+    /// circuits. All connectors of one session hold the SAME token, so their
+    /// streams may share a circuit while other sessions' cannot.
+    pub(crate) isolation: Option<IsolationToken>,
 }
 
 impl std::fmt::Debug for ArtiConnector {
@@ -22,6 +26,13 @@ impl std::fmt::Debug for ArtiConnector {
         f.debug_struct("ArtiConnector")
             .field("max_msg_len", &self.max_msg_len)
             .finish_non_exhaustive()
+    }
+}
+
+impl ArtiConnector {
+    #[cfg(test)]
+    pub(crate) fn isolation(&self) -> Option<IsolationToken> {
+        self.isolation
     }
 }
 
@@ -37,9 +48,14 @@ impl Connector for ArtiConnector {
         let max = self.max_msg_len;
         let host = addr.host().to_owned();
         let port = addr.port();
+        let isolation = self.isolation;
         async move {
+            let mut prefs = StreamPrefs::new();
+            if let Some(token) = isolation {
+                prefs.set_isolation(token);
+            }
             let stream = client
-                .connect((host.as_str(), port))
+                .connect_with_prefs((host.as_str(), port), &prefs)
                 .await
                 .map_err(connect_error)?;
             Ok(FramedChannel::new(stream, max))

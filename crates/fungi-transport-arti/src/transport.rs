@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arti_client::config::TorClientConfigBuilder;
-use arti_client::{TorClient, TorClientConfig};
+use arti_client::{IsolationToken, TorClient, TorClientConfig};
 use fungi_transport::ConnectError;
 use fungi_transport::framed::DEFAULT_MAX_MSG_LEN;
 use tor_rtcompat::PreferredRuntime;
@@ -66,6 +66,12 @@ pub(crate) fn test_config(cfg: &ArtiConfig) -> TorClientConfig {
 pub struct ArtiTransport {
     pub(crate) client: Arc<TorClient<PreferredRuntime>>,
     pub(crate) max_msg_len: usize,
+    /// One isolation token per logical session, so repeated `connector_for`
+    /// calls with the same session reuse a token (and thus a circuit group)
+    /// while distinct sessions never do. Grows by one small entry per
+    /// session; sessions per transport are few, so no eviction is needed.
+    sessions:
+        std::sync::Mutex<std::collections::HashMap<fungi_transport::SessionId, IsolationToken>>,
 }
 
 impl std::fmt::Debug for ArtiTransport {
@@ -114,15 +120,34 @@ impl ArtiTransport {
         Self {
             client,
             max_msg_len,
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The isolation token for `session`, minting and storing a fresh one the
+    /// first time — so every connector of a session shares one token.
+    fn isolation_for(&self, session: &fungi_transport::SessionId) -> IsolationToken {
+        // The guard never crosses an await (this whole method is sync).
+        *self
+            .sessions
+            .lock()
+            .expect("arti session map mutex")
+            .entry(*session)
+            .or_insert_with(IsolationToken::new)
+    }
+
+    /// Build a connector from the shared client with the given isolation.
+    fn make_connector(&self, isolation: Option<IsolationToken>) -> crate::ArtiConnector {
+        crate::ArtiConnector {
+            client: self.client.clone(),
+            max_msg_len: self.max_msg_len,
+            isolation,
         }
     }
 
     /// The connector half, sharing this transport's client.
     pub fn connector(&self) -> crate::ArtiConnector {
-        crate::ArtiConnector {
-            client: self.client.clone(),
-            max_msg_len: self.max_msg_len,
-        }
+        self.make_connector(None)
     }
 }
 
@@ -132,18 +157,14 @@ impl fungi_transport::Transport for ArtiTransport {
     type Listener = crate::ArtiListener;
 
     fn connector(&self) -> crate::ArtiConnector {
-        // Build the connector from the shared client (same as the inherent
-        // `connector`); the inherent method stays for direct callers.
-        crate::ArtiConnector {
-            client: self.client.clone(),
-            max_msg_len: self.max_msg_len,
-        }
+        // Same as the inherent `connector`; that one stays for direct callers.
+        self.make_connector(None)
     }
 
-    fn connector_for(&self, _session: &fungi_transport::SessionId) -> crate::ArtiConnector {
-        // Stream-isolation per session lands in a follow-up: this delegates
-        // to the shared connector for now.
-        <Self as fungi_transport::Transport>::connector(self)
+    fn connector_for(&self, session: &fungi_transport::SessionId) -> crate::ArtiConnector {
+        // Same session -> same token -> shared circuit group; distinct
+        // sessions -> distinct tokens -> isolated circuits.
+        self.make_connector(Some(self.isolation_for(session)))
     }
 
     fn listen(
@@ -221,5 +242,36 @@ mod tests {
     #[test]
     fn transport_contract_holds() {
         // arti_is_transport compiling IS the assertion.
+    }
+
+    /// The session→token map: the default connector has no isolation; a
+    /// per-session connector has one; the SAME session reuses its token
+    /// (shared circuit group) while DISTINCT sessions get distinct tokens
+    /// (isolated circuits). No network — only the token wiring is exercised.
+    #[tokio::test]
+    async fn connector_for_maps_sessions_to_isolation_tokens() {
+        use fungi_transport::{SessionId, Transport};
+        use rustls::crypto::ring::default_provider;
+
+        let _ = default_provider().install_default();
+        let cfg = ArtiConfig::new(tmp("iso-s"), tmp("iso-c"));
+        let client = arti_client::TorClient::builder()
+            .config(test_config(&cfg))
+            .bootstrap_behavior(arti_client::BootstrapBehavior::Manual)
+            .create_unbootstrapped()
+            .unwrap();
+        let transport = ArtiTransport::from_client(client, cfg.max_msg_len);
+
+        assert_eq!(transport.connector().isolation(), None);
+
+        let (s1, s2) = (SessionId::generate(), SessionId::generate());
+        let t1 = transport.connector_for(&s1).isolation().unwrap();
+        let t2 = transport.connector_for(&s2).isolation().unwrap();
+        assert_ne!(t1, t2, "distinct sessions get distinct tokens");
+        assert_eq!(
+            transport.connector_for(&s1).isolation().unwrap(),
+            t1,
+            "same session reuses its token"
+        );
     }
 }
