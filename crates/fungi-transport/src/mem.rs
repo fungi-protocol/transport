@@ -1,6 +1,10 @@
 //! In-memory pipe implementation of the [`crate::channel`] traits. Two
 //! crossed bounded `tokio::sync::mpsc` queues; capacity 1 by default so a
 //! slow transport is simulated for free.
+//!
+//! The opening contract is simulated, not provided: both ends live in one
+//! process, so there is no real anonymity or authentication here — this
+//! backend exists to exercise the trait semantics in tests.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};

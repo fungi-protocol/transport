@@ -15,6 +15,12 @@
 //! cancelled mid-handshake rejects that one in-flight inbound request (the
 //! peer's `connect` fails and it simply reconnects).
 //!
+//! Trust base for the opening contract: in-process. Tor runs inside this
+//! process, so dialer anonymity and responder authentication (the onion
+//! key behind a dialed address) are enforced by `arti-client` itself —
+//! there is no daemon boundary to trust, only this process and its state
+//! directory (which holds the onion identity keys).
+//!
 //! Deterministic tests run in CI; the cross-backend path is exercised by the
 //! NixOS VM suite.
 

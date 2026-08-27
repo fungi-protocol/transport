@@ -10,6 +10,13 @@
 //! `connect`/`bind` indefinitely. Callers own the timeout — wrap the future
 //! in `tokio::time::timeout` (or similar); cancelling by drop is safe and
 //! discards the whole connection attempt.
+//!
+//! Trust base for the opening contract: the daemon is part of it. It is the
+//! daemon — not this crate — that verifies the onion key behind a dialed
+//! address and keeps the dialer anonymous, so whoever controls the SOCKS
+//! and control ports controls those guarantees. The crate assumes a
+//! trusted daemon on localhost; the local forward port of a listener is
+//! likewise reachable by any local process.
 
 mod control;
 mod socks5;

@@ -32,6 +32,12 @@
 //! single [`Channel`] backend, from the Channel-only phase) and [`serve_plugin`]
 //! (an arbitrary [`Transport`] backend exposed as the whole capnp graph).
 //!
+//! The opening contract passes through unchanged: this layer only proxies a
+//! backend, so a channel's anonymity and authentication guarantees are
+//! whatever the plugged backend provides. The capnp link itself (stdio to a
+//! child process, or an in-memory duplex) is same-host plumbing inside the
+//! trust base, not a network boundary.
+//!
 //! A plugin can run either in-process — over an in-memory duplex, driven by
 //! [`serve_plugin`] on a background thread — or as a real child process:
 //! [`connect_plugin`] spawns a program, speaks capnp-rpc over its stdin/stdout,
