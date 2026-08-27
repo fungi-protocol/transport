@@ -123,6 +123,12 @@ impl Transport for LazyArtiTransport {
         }
     }
 
+    fn connector_for(&self, _session: &fungi_transport::SessionId) -> LazyArtiConnector {
+        // Stream-isolation per session lands in a follow-up: this delegates
+        // to the shared connector for now.
+        self.connector()
+    }
+
     fn listen(
         &self,
         params: ListenParams,

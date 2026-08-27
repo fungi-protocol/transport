@@ -140,6 +140,12 @@ impl fungi_transport::Transport for ArtiTransport {
         }
     }
 
+    fn connector_for(&self, _session: &fungi_transport::SessionId) -> crate::ArtiConnector {
+        // Stream-isolation per session lands in a follow-up: this delegates
+        // to the shared connector for now.
+        <Self as fungi_transport::Transport>::connector(self)
+    }
+
     fn listen(
         &self,
         params: fungi_transport::ListenParams,

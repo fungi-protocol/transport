@@ -11,6 +11,7 @@ use std::future::Future;
 use futures_core::Stream;
 
 use crate::error::{ConnectError, RecvError, SendError};
+use crate::session::SessionId;
 
 /// A datagram channel to ONE peer: opaque bytes, one message per call.
 ///
@@ -178,8 +179,18 @@ pub trait Transport: Send {
     /// The listener this transport produces.
     type Listener: Listener;
 
-    /// A connector for dialing peers.
+    /// A connector for dialing peers on the transport's shared default
+    /// session. Use [`connector_for`](Transport::connector_for) to isolate a
+    /// logical session onto its own circuits.
     fn connector(&self) -> Self::Connector;
+
+    /// A connector bound to `session`. Channels opened through connectors of
+    /// DIFFERENT sessions must not share a transport circuit — so their
+    /// streams cannot be correlated by network metadata — while connectors of
+    /// the SAME session may share one. Isolation is per transport: the same
+    /// [`SessionId`] on another transport (or process) shares nothing. See
+    /// [`session`](crate::session).
+    fn connector_for(&self, session: &SessionId) -> Self::Connector;
 
     /// Create and publish a listener, returning it together with the onion
     /// address it was published under (the generated/loaded identity).

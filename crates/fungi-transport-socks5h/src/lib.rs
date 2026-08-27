@@ -116,6 +116,12 @@ impl Transport for TorTransport {
         TorConnector::new(self.cfg.clone())
     }
 
+    fn connector_for(&self, _session: &fungi_transport::SessionId) -> TorConnector {
+        // Session isolation lands in a follow-up: this delegates to the
+        // shared connector for now.
+        TorConnector::new(self.cfg.clone())
+    }
+
     fn listen(
         &self,
         params: ListenParams,

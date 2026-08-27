@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::channel::{Channel, Connector, Listener};
 use crate::error::{ConnectError, RecvError, SendError};
+use crate::session::SessionId;
 
 /// What `send` promises in this mock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -167,10 +168,25 @@ impl std::str::FromStr for MemAddr {
 
 /// Connector half of an in-memory network: each `connect` produces a fresh
 /// channel pair, handing the far end to the paired [`MemListener`].
+///
+/// `session` records which logical session this connector serves. There are
+/// no real circuits in memory, so isolation here is only observable, not
+/// enforced: [`session`](MemConnector::session) lets a test assert that
+/// per-session connectors carry the distinct identity a real backend would
+/// isolate on.
 #[derive(Debug, Clone)]
 pub struct MemConnector {
     cfg: MemConfig,
     to_listener: mpsc::Sender<MemChannel>,
+    session: Option<SessionId>,
+}
+
+impl MemConnector {
+    /// The logical session this connector serves, or `None` for the
+    /// transport's shared default session.
+    pub fn session(&self) -> Option<SessionId> {
+        self.session
+    }
 }
 
 /// Listener half of an in-memory network.
@@ -182,7 +198,14 @@ pub struct MemListener {
 /// Create a connector/listener pair sharing an in-memory "network".
 pub fn network(cfg: MemConfig) -> (MemConnector, MemListener) {
     let (to_listener, inbound) = mpsc::channel(8);
-    (MemConnector { cfg, to_listener }, MemListener { inbound })
+    (
+        MemConnector {
+            cfg,
+            to_listener,
+            session: None,
+        },
+        MemListener { inbound },
+    )
 }
 
 /// In-memory [`Transport`](crate::channel::Transport): a factory over one
@@ -212,6 +235,13 @@ impl crate::channel::Transport for MemTransport {
 
     fn connector(&self) -> MemConnector {
         self.connector.clone()
+    }
+
+    fn connector_for(&self, session: &SessionId) -> MemConnector {
+        MemConnector {
+            session: Some(*session),
+            ..self.connector.clone()
+        }
     }
 
     async fn listen(
@@ -474,5 +504,32 @@ mod tests {
             transport.listen(ListenParams::new(1)).await,
             Err(crate::error::ConnectError::Unreachable)
         ));
+    }
+
+    // Session plumbing (the observable half of isolation, which is all the
+    // mock can show): the default connector carries no session; a
+    // per-session connector carries exactly the id it was built for, and
+    // distinct sessions carry distinct ids — the identity a real backend
+    // isolates circuits on.
+    #[test]
+    fn connector_for_carries_the_session_identity() {
+        use crate::channel::Transport;
+        use crate::session::SessionId;
+        let transport = MemTransport::new(MemConfig::default());
+        assert_eq!(transport.connector().session(), None);
+
+        let (s1, s2) = (SessionId::generate(), SessionId::generate());
+        assert_eq!(transport.connector_for(&s1).session(), Some(s1));
+        assert_eq!(transport.connector_for(&s2).session(), Some(s2));
+        assert_ne!(
+            transport.connector_for(&s1).session(),
+            transport.connector_for(&s2).session()
+        );
+        // Same session, two connectors: same identity (a real backend would
+        // let these share a circuit).
+        assert_eq!(
+            transport.connector_for(&s1).session(),
+            transport.connector_for(&s1).session()
+        );
     }
 }

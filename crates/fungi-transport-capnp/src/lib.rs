@@ -775,6 +775,12 @@ where
         }
     }
 
+    fn connector_for(&self, _session: &fungi_transport::SessionId) -> CapnpConnector<A> {
+        // Carrying the session across the plugin boundary lands in a
+        // follow-up: this delegates to the shared connector for now.
+        self.connector()
+    }
+
     fn listen(
         &self,
         params: ListenParams,
