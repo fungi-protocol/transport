@@ -17,6 +17,12 @@
 //! and control ports controls those guarantees. The crate assumes a
 //! trusted daemon on localhost; the local forward port of a listener is
 //! likewise reachable by any local process.
+//!
+//! Per-session isolation is likewise the daemon's: a session-bound connector
+//! dials with the session's SOCKS username, and the daemon separates circuits
+//! by credential only under `IsolateSOCKSAuth` (its default). A daemon with
+//! that turned off would collapse the isolation. Isolation covers the dialing
+//! side; inbound rendezvous circuits at a listener are the daemon's to place.
 
 mod control;
 mod socks5;
@@ -64,7 +70,7 @@ impl Default for TorConfig {
 /// Opens channels to `.onion` peers through the daemon's SOCKS5h proxy.
 ///
 /// A connector bound to a session (via
-/// [`Transport::connector_for`](fungi_transport::Transport::connector_for))
+/// [`fungi_transport::Transport::connector_for`])
 /// dials with a SOCKS credential derived from the session id, so the daemon
 /// isolates its circuits from other sessions'. The default connector carries
 /// none.

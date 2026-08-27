@@ -21,6 +21,12 @@
 //! there is no daemon boundary to trust, only this process and its state
 //! directory (which holds the onion identity keys).
 //!
+//! Per-session isolation is enforced by arti directly: a session-bound
+//! connector dials with the session's stream-isolation token, so distinct
+//! sessions never share a circuit — unconditionally, unlike the SOCKS5h
+//! backend, which relies on the daemon's `IsolateSOCKSAuth`. Isolation
+//! covers the dialing side; inbound rendezvous circuits are arti's to place.
+//!
 //! Deterministic tests run in CI; the cross-backend path is exercised by the
 //! NixOS VM suite.
 
