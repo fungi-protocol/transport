@@ -16,7 +16,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use fungi_transport::{ConnectError, Connector, ListenParams, OnionAddr, Transport};
+use fungi_transport::{ConnectError, Connector, ListenParams, OnionAddr, SessionId, Transport};
 use tokio::sync::OnceCell;
 
 use crate::{ArtiConfig, ArtiConnector, ArtiListener, ArtiTransport, PrivateNet};
@@ -120,13 +120,15 @@ impl Transport for LazyArtiTransport {
     fn connector(&self) -> LazyArtiConnector {
         LazyArtiConnector {
             inner: self.inner.clone(),
+            session: None,
         }
     }
 
-    fn connector_for(&self, _session: &fungi_transport::SessionId) -> LazyArtiConnector {
-        // Stream-isolation per session lands in a follow-up: this delegates
-        // to the shared connector for now.
-        self.connector()
+    fn connector_for(&self, session: &SessionId) -> LazyArtiConnector {
+        LazyArtiConnector {
+            inner: self.inner.clone(),
+            session: Some(*session),
+        }
     }
 
     fn listen(
@@ -144,6 +146,10 @@ impl Transport for LazyArtiTransport {
 #[derive(Clone)]
 pub struct LazyArtiConnector {
     inner: Arc<LazyInner>,
+    /// Session this connector is bound to; `None` dials on the shared default.
+    /// The session's isolation token lives on the bootstrapped transport, so
+    /// it can only be resolved after the one bootstrap, inside `connect`.
+    session: Option<SessionId>,
 }
 
 impl std::fmt::Debug for LazyArtiConnector {
@@ -162,7 +168,15 @@ impl Connector for LazyArtiConnector {
     ) -> impl Future<Output = Result<Self::Channel, ConnectError>> + Send {
         let inner = self.inner.clone();
         let addr = addr.clone();
-        async move { inner.get().await?.connector().connect(&addr).await }
+        let session = self.session;
+        async move {
+            let transport = inner.get().await?;
+            let connector = match &session {
+                Some(session) => transport.connector_for(session),
+                None => transport.connector(),
+            };
+            connector.connect(&addr).await
+        }
     }
 }
 
@@ -200,6 +214,20 @@ mod tests {
         assert!(t.configure_private_net(b"not a valid line").is_err());
     }
 
+    /// The session→connector plumbing: the default connector is unbound,
+    /// session-bound connectors carry their session, and distinct sessions
+    /// stay distinct. Resolving the session to an isolation token is the
+    /// bootstrapped transport's job, pinned by its own tests; no bootstrap
+    /// and no network are involved here.
+    #[test]
+    fn connector_for_carries_the_session() {
+        let t = lazy();
+        let (s1, s2) = (SessionId::generate(), SessionId::generate());
+        assert_eq!(t.connector().session, None);
+        assert_eq!(t.connector_for(&s1).session, Some(s1));
+        assert_ne!(t.connector_for(&s1).session, t.connector_for(&s2).session);
+    }
+
     fn assert_send<T: Send>(_: T) {}
 
     /// The lazy transport and its connector are `Send`, and their factory
@@ -210,7 +238,7 @@ mod tests {
         assert_send(&t);
         assert_send(t.connector());
         assert_send(t.listen(ListenParams::new(1)));
-        let c = t.connector();
+        let c = t.connector_for(&SessionId::generate());
         assert_send(c.connect(&OnionAddr::new(format!("{:a<56}.onion", "x"), 1).unwrap()));
     }
 }
