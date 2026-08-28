@@ -32,6 +32,8 @@ pub(crate) struct Cli {
 pub(crate) enum Cmd {
     Listen {
         virt_port: u16,
+        /// How many peers to accept and echo, one after the other.
+        peers: u16,
     },
     Dial {
         target: OnionAddr,
@@ -50,6 +52,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut plugin = None;
     let mut state_dir = None;
     let mut session = None;
+    let mut peers = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--private-net" => {
@@ -67,6 +70,14 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 virt_port = Some(
                     it.next()
                         .ok_or("--virt-port needs a number")?
+                        .parse::<u16>()
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            "--peers" => {
+                peers = Some(
+                    it.next()
+                        .ok_or("--peers needs a count")?
                         .parse::<u16>()
                         .map_err(|e| e.to_string())?,
                 )
@@ -91,6 +102,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let cmd = match cmd_word.as_str() {
         "listen" => Cmd::Listen {
             virt_port: virt_port.ok_or("listen needs --virt-port")?,
+            peers: peers.unwrap_or(1),
         },
         "dial" => Cmd::Dial {
             target: target.ok_or("dial needs a host:port target")?,
@@ -106,10 +118,15 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     })
 }
 
-/// Listen over any backend: publish, accept one peer, echo until it closes.
-/// Establishment awaits are bounded by `STEP_TIMEOUT`; `accept()` by the wider
-/// `ACCEPT_TIMEOUT`.
-pub(crate) async fn run_listen<T>(transport: T, params: ListenParams) -> Result<(), String>
+/// Listen over any backend: publish, then accept and echo `peers` peers, one
+/// after the other, each until it closes. Establishment awaits are bounded by
+/// `STEP_TIMEOUT`; each `accept()` gets its own `ACCEPT_TIMEOUT`, so a later
+/// peer's budget does not shrink with the earlier peers' wall time.
+pub(crate) async fn run_listen<T>(
+    transport: T,
+    params: ListenParams,
+    peers: u16,
+) -> Result<(), String>
 where
     T: Transport,
     T::Addr: std::fmt::Display,
@@ -120,13 +137,16 @@ where
         .map_err(|e| e.to_string())?;
     println!("ONION={addr}");
     println!("READY");
-    let ch = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
-        .await
-        .map_err(|_| "accept timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-    tokio::time::timeout(STEP_TIMEOUT, echo_one_peer(ch))
-        .await
-        .map_err(|_| "echo/dial phase timed out".to_string())?
+    for _ in 0..peers {
+        let ch = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
+            .await
+            .map_err(|_| "accept timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        tokio::time::timeout(STEP_TIMEOUT, echo_one_peer(ch))
+            .await
+            .map_err(|_| "echo/dial phase timed out".to_string())??;
+    }
+    Ok(())
 }
 
 /// Dial one peer over any connector: connect, run the message sequence.
@@ -188,10 +208,11 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     match &cli.cmd {
-        Cmd::Listen { virt_port } => {
+        Cmd::Listen { virt_port, peers } => {
             run_listen(
                 transport,
                 ListenParams::new(*virt_port).with_nickname("fungie2e"),
+                *peers,
             )
             .await
         }
@@ -218,9 +239,26 @@ mod tests {
             ..MemConfig::default()
         });
         let connector = transport.connector();
-        let listen = tokio::spawn(run_listen(transport, ListenParams::new(1)));
+        let listen = tokio::spawn(run_listen(transport, ListenParams::new(1), 1));
         // The dialer connects, runs the sequence, then drops — the echo side sees
         // the close and run_listen returns Ok.
+        run_dial(connector, &MemAddr).await.unwrap();
+        listen.await.unwrap().unwrap();
+    }
+
+    /// With `peers: 2` the listener survives its first peer's departure and
+    /// serves the next dial; it returns only after both ran the sequence.
+    #[tokio::test]
+    async fn run_listen_serves_peers_one_after_the_other() {
+        use fungi_transport::mem::{MemAddr, MemConfig, MemTransport};
+        use fungi_transport::{ListenParams, Transport};
+        let transport = MemTransport::new(MemConfig {
+            capacity: Some(16),
+            ..MemConfig::default()
+        });
+        let connector = transport.connector();
+        let listen = tokio::spawn(run_listen(transport, ListenParams::new(1), 2));
+        run_dial(connector.clone(), &MemAddr).await.unwrap();
         run_dial(connector, &MemAddr).await.unwrap();
         listen.await.unwrap().unwrap();
     }
@@ -372,7 +410,7 @@ mod tests {
 
         let transport: CapnpTransport<MemAddr> = CapnpTransport::connect(client_io);
         let connector = transport.connector();
-        let listen = tokio::spawn(run_listen(transport, ListenParams::new(1)));
+        let listen = tokio::spawn(run_listen(transport, ListenParams::new(1), 1));
         // The dialer connects, runs the sequence, then drops — the echo side sees
         // the close and run_listen returns Ok.
         run_dial(connector, &MemAddr).await.unwrap();
