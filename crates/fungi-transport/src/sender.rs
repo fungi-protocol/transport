@@ -1,8 +1,8 @@
 //! Opaque identity of a message's sender, for attributable channels.
 //!
-//! [`SenderId`] is the identity an attributable channel exposes: which peer a
-//! message is from. It is a lookup key — compared and hashed, never
-//! interpreted. Each backend implements it for its own identity
+//! [`SenderId`] is the identity an [`AttributableChannel`](crate::AttributableChannel)
+//! exposes: which peer a message is from. It is a lookup key — compared and
+//! hashed, never interpreted. Each backend implements it for its own identity
 //! type (a Tor onion key, an OHTTP mailbox credential), so the transport
 //! layer imposes no representation; consumers receive `impl SenderId` and can
 //! only use it as a key.

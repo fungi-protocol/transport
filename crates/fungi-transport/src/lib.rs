@@ -30,7 +30,9 @@ pub mod session;
 pub mod testkit;
 
 pub use addr::{OnionAddr, ParseOnionAddrError};
-pub use channel::{Channel, Connector, ListenParams, Listener, Transport, into_stream};
+pub use channel::{
+    AttributableChannel, Channel, Connector, ListenParams, Listener, Transport, into_stream,
+};
 pub use error::{BoxError, ConnectError, RecvError, SendError};
 pub use harness::{dial_sequence, echo_one_peer};
 pub use sender::SenderId;

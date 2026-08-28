@@ -11,6 +11,7 @@ use std::future::Future;
 use futures_core::Stream;
 
 use crate::error::{ConnectError, RecvError, SendError};
+use crate::sender::SenderId;
 use crate::session::SessionId;
 
 /// A datagram channel to ONE peer: opaque bytes, one message per call.
@@ -61,6 +62,35 @@ pub trait Channel: Send {
     /// Send one opaque message to the peer.
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
     /// Wait for and return the next message from the peer.
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
+}
+
+/// A P2P channel whose peer is AUTHENTICATED: every message on it is from the
+/// one known sender, named by [`sender`](AttributableChannel::sender).
+///
+/// This is the *attributable* half of the anonymous/attributable split. It
+/// carries the same opaque-bytes, one-message-per-call contract as [`Channel`]
+/// (delivery semantics, cancel-safety, the error taxonomy — all identical);
+/// the only addition is the known sender. Because a P2P channel has ONE peer,
+/// the sender is exposed ONCE, not per message — per-message attribution is
+/// broadcast's shape, and a broadcast channel is a distinct type built later.
+///
+/// It is deliberately NOT a supertrait of, nor interchangeable with,
+/// [`Channel`]: an anonymous channel and an attributable one are different
+/// types so the compiler keeps them apart (you cannot pass one where the other
+/// is expected). Both are P2P; the broadcast counterparts arrive with the
+/// broadcast/gossip layer.
+pub trait AttributableChannel: Send {
+    /// The sender identity type this channel attributes messages to.
+    type Sender: SenderId;
+
+    /// The peer every message on this channel is from.
+    fn sender(&self) -> &Self::Sender;
+
+    /// Send one opaque message to the peer.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
+    /// Wait for and return the next message from the peer (from
+    /// [`sender`](AttributableChannel::sender)).
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
 }
 
@@ -245,6 +275,52 @@ mod tests {
         assert_send(ch.recv());
         assert_eq!(ch.recv().await.unwrap(), b"ping");
         assert!(matches!(ch.recv().await, Err(RecvError::Closed)));
+    }
+
+    /// A minimal `SenderId` for exercising the attributable trait.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct TestSender(Vec<u8>);
+    impl SenderId for TestSender {
+        fn as_bytes(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    /// Loopback with a known sender: proves `AttributableChannel` is
+    /// implementable with Send futures, and that `sender` names the one peer.
+    struct AttributedLoopback {
+        sender: TestSender,
+        queue: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl AttributableChannel for AttributedLoopback {
+        type Sender = TestSender;
+        fn sender(&self) -> &TestSender {
+            &self.sender
+        }
+        fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+            self.queue.push_back(msg.to_vec());
+            async { Ok(()) }
+        }
+        fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
+            let next = self.queue.pop_front();
+            async move { next.ok_or(RecvError::Closed) }
+        }
+    }
+
+    #[tokio::test]
+    async fn attributable_channel_is_implementable_and_names_its_sender() {
+        let mut ch = AttributedLoopback {
+            sender: TestSender(b"alice".to_vec()),
+            queue: Default::default(),
+        };
+        // The sender is known once, for the whole channel — not per message.
+        assert_eq!(ch.sender().as_bytes(), b"alice");
+        assert_send(ch.send(b"hi"));
+        ch.send(b"hi").await.unwrap();
+        assert_send(ch.recv());
+        assert_eq!(ch.recv().await.unwrap(), b"hi");
+        assert_eq!(ch.sender().as_bytes(), b"alice");
     }
 
     #[tokio::test]
