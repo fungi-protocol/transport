@@ -2,6 +2,11 @@
 
 A P2P datagram-channel abstraction for the Fungi protocol
 
+> **Temporary home.** This repository is where the transport layer is being
+> developed in isolation. Once it stabilizes, this work will move into the
+> Fungi monorepo at
+> [fungi-protocol/fungi](https://github.com/fungi-protocol/fungi).
+
 The core idea is a **channel**: a connection to *one* peer that moves opaque
 byte messages, one message per call. It carries no ordering across channels, no
 deduplication, no framing; those belong to other layers.
