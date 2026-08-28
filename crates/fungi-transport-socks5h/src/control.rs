@@ -79,17 +79,13 @@ async fn expect_ok(conn: &mut BufReader<TcpStream>) -> Result<(), ConnectError> 
     }
 }
 
-/// Authenticate and publish an ephemeral v3 onion service forwarding
-/// `virt_port` to `127.0.0.1:local_port`.
-pub(crate) async fn create_onion(
+/// Open a control connection and authenticate on it.
+async fn open_authenticated(
     control: SocketAddr,
     auth: &ControlAuth,
-    virt_port: u16,
-    local_port: u16,
-) -> Result<OnionService, ConnectError> {
+) -> Result<BufReader<TcpStream>, ConnectError> {
     let stream = TcpStream::connect(control).await.map_err(io_err)?;
     let mut conn = BufReader::new(stream);
-
     let auth_line = match auth {
         ControlAuth::Null => "AUTHENTICATE\r\n".to_owned(),
         ControlAuth::CookieFile(path) => {
@@ -102,6 +98,67 @@ pub(crate) async fn create_onion(
         .await
         .map_err(io_err)?;
     expect_ok(&mut conn).await?;
+    Ok(conn)
+}
+
+/// Verify the daemon separates circuits by SOCKS credential: read its
+/// `SocksPort` configuration and error if any line carries the
+/// `NoIsolateSOCKSAuth` flag. The flag's absence means the daemon default
+/// (`IsolateSOCKSAuth` on) applies, which is what per-session isolation
+/// relies on; a daemon with it disabled would collapse all sessions onto
+/// shared circuits without any observable failure.
+pub(crate) async fn verify_isolate_socks_auth(
+    control: SocketAddr,
+    auth: &ControlAuth,
+) -> Result<(), ConnectError> {
+    let mut conn = open_authenticated(control, auth).await?;
+    conn.get_mut()
+        .write_all(b"GETCONF SocksPort\r\n")
+        .await
+        .map_err(io_err)?;
+    // One reply line per configured SocksPort value: `250-` continuations,
+    // then a final `250 `-prefixed line. Flags appear inside the value as
+    // written in the configuration, so every line is scanned.
+    loop {
+        let line = read_reply_line(&mut conn).await?;
+        let (payload, last) = if let Some(rest) = line.strip_prefix("250-") {
+            (rest, false)
+        } else if let Some(rest) = line.strip_prefix("250 ") {
+            (rest, true)
+        } else {
+            return Err(ConnectError::Transport(
+                format!("GETCONF SocksPort failed: {line}").into(),
+            ));
+        };
+        // Values may arrive as a QuotedString, so quotes are stripped from
+        // each token before comparing.
+        if payload.split(['=', ' ', '\t']).any(|token| {
+            token
+                .trim_matches('"')
+                .eq_ignore_ascii_case("NoIsolateSOCKSAuth")
+        }) {
+            return Err(ConnectError::Transport(
+                "the daemon's SocksPort sets NoIsolateSOCKSAuth, which disables the \
+                 per-credential circuit isolation that per-session isolation relies on; \
+                 remove the flag (the daemon default is isolation on)"
+                    .into(),
+            ));
+        }
+        if last {
+            return Ok(());
+        }
+    }
+}
+
+/// Authenticate and publish an ephemeral v3 onion service forwarding
+/// `virt_port` to `127.0.0.1:local_port`.
+pub(crate) async fn create_onion(
+    control: SocketAddr,
+    auth: &ControlAuth,
+    virt_port: u16,
+    local_port: u16,
+) -> Result<OnionService, ConnectError> {
+    let mut conn = open_authenticated(control, auth).await?;
 
     // DiscardPK: the identity is ephemeral by design — a fresh onion
     // address per listener; we never reuse the key.
@@ -170,6 +227,76 @@ mod tests {
         // lifetime is the connection's lifetime).
         let mut rest = String::new();
         let _ = sock.read_line(&mut rest).await;
+    }
+
+    /// One-connection fake for the isolation check: null-auth, then answers
+    /// `GETCONF SocksPort` with `reply` verbatim.
+    async fn fake_control_getconf(listener: TcpListener, reply: &'static str) {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut sock = BufReader::new(sock);
+        let mut line = String::new();
+        sock.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), "AUTHENTICATE");
+        sock.get_mut().write_all(b"250 OK\r\n").await.unwrap();
+        line.clear();
+        sock.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), "GETCONF SocksPort");
+        sock.get_mut().write_all(reply.as_bytes()).await.unwrap();
+    }
+
+    async fn check_against(reply: &'static str) -> Result<(), ConnectError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control = listener.local_addr().unwrap();
+        tokio::spawn(fake_control_getconf(listener, reply));
+        verify_isolate_socks_auth(control, &ControlAuth::Null).await
+    }
+
+    #[tokio::test]
+    async fn isolation_check_accepts_the_default_config() {
+        check_against("250 SocksPort=9050\r\n").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn isolation_check_rejects_no_isolate_socks_auth() {
+        let err = check_against("250 SocksPort=9050 NoIsolateSOCKSAuth\r\n")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("NoIsolateSOCKSAuth"),
+            "the error must name the offending flag, got: {err}"
+        );
+    }
+
+    /// Every configured SocksPort line is scanned, not only the first.
+    #[tokio::test]
+    async fn isolation_check_scans_every_config_line() {
+        check_against("250-SocksPort=9050\r\n250 SocksPort=9051 NoIsolateSOCKSAuth\r\n")
+            .await
+            .unwrap_err();
+    }
+
+    /// The daemon accepts its option names in any case, so the check must too.
+    #[tokio::test]
+    async fn isolation_check_is_case_insensitive() {
+        check_against("250 SocksPort=9050 noisolatesocksauth\r\n")
+            .await
+            .unwrap_err();
+    }
+
+    /// The reply value may arrive as a QuotedString; the flag is still found.
+    #[tokio::test]
+    async fn isolation_check_sees_through_quoted_values() {
+        check_against("250 SocksPort=\"9050 NoIsolateSOCKSAuth\"\r\n")
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn isolation_check_surfaces_daemon_errors() {
+        let err = check_against("552 Unrecognized configuration key\r\n")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("552"), "got: {err}");
     }
 
     #[tokio::test]

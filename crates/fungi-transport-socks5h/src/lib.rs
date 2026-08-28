@@ -21,8 +21,13 @@
 //! Per-session isolation is likewise the daemon's: a session-bound connector
 //! dials with the session's SOCKS username, and the daemon separates circuits
 //! by credential only under `IsolateSOCKSAuth` (its default). A daemon with
-//! that turned off would collapse the isolation. Isolation covers the dialing
-//! side; inbound rendezvous circuits at a listener are the daemon's to place.
+//! that turned off would collapse the isolation silently, so a session-bound
+//! connector reads the daemon's `SocksPort` configuration over the control
+//! port before its first dial and fails loudly if the flag is disabled. That
+//! turns an honest misconfiguration into an error; a daemon that lies about
+//! its configuration already controls every guarantee here. Isolation covers
+//! the dialing side; inbound rendezvous circuits at a listener are the
+//! daemon's to place.
 
 mod control;
 mod socks5;
@@ -79,6 +84,11 @@ pub struct TorConnector {
     cfg: TorConfig,
     /// SOCKS username for circuit isolation; `None` uses no-auth.
     credential: Option<String>,
+    /// Set once the daemon's isolation config has been verified over the
+    /// control port. Only credentialed connects consult it; a failed check
+    /// leaves it empty, so the next connect retries instead of caching the
+    /// failure.
+    isolation_verified: std::sync::Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl TorConnector {
@@ -88,15 +98,20 @@ impl TorConnector {
         Self {
             cfg,
             credential: None,
+            isolation_verified: Default::default(),
         }
     }
 
     /// A connector whose streams carry `credential` as the SOCKS username,
-    /// isolating them onto their own circuits.
+    /// isolating them onto their own circuits. The first connect verifies,
+    /// over the control port, that the daemon has not disabled
+    /// per-credential isolation, and fails instead of dialing on a daemon
+    /// that would silently collapse the sessions onto shared circuits.
     pub fn with_credential(cfg: TorConfig, credential: String) -> Self {
         Self {
             cfg,
             credential: Some(credential),
+            isolation_verified: Default::default(),
         }
     }
 
@@ -115,11 +130,19 @@ impl Connector for TorConnector {
         addr: &OnionAddr,
     ) -> impl Future<Output = Result<Self::Channel, ConnectError>> + Send {
         let socks_addr = self.cfg.socks_addr;
+        let control_addr = self.cfg.control_addr;
+        let auth = self.cfg.auth.clone();
         let max = self.cfg.max_msg_len;
         let host = addr.host().to_owned();
         let port = addr.port();
         let credential = self.credential.clone();
+        let isolation_verified = self.isolation_verified.clone();
         async move {
+            if credential.is_some() {
+                isolation_verified
+                    .get_or_try_init(|| control::verify_isolate_socks_auth(control_addr, &auth))
+                    .await?;
+            }
             let stream = socks5::connect(socks_addr, &host, port, credential.as_deref()).await?;
             Ok(FramedChannel::new(stream, max))
         }
@@ -243,8 +266,183 @@ impl Listener for TorListener {
 mod tests {
     use super::*;
     use fungi_transport::Channel as _;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Control fake that serves the isolation check on every connection,
+    /// answering `GETCONF SocksPort` with `reply` and counting connections.
+    async fn fake_control_isolation(
+        listener: TcpListener,
+        reply: &'static str,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut sock = tokio::io::BufReader::new(sock);
+            let mut line = String::new();
+            sock.read_line(&mut line).await.unwrap();
+            sock.get_mut().write_all(b"250 OK\r\n").await.unwrap();
+            line.clear();
+            sock.read_line(&mut line).await.unwrap();
+            sock.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        }
+    }
+
+    /// Fake SOCKS proxy requiring username/password: complete the handshake
+    /// on every connection (no byte assertions; socks5.rs tests own those),
+    /// report each username on `users`, and hold the tunnel open.
+    async fn fake_socks_authed(
+        listener: TcpListener,
+        users: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        loop {
+            let Ok((mut client, _)) = listener.accept().await else {
+                return;
+            };
+            let mut head = [0u8; 2];
+            client.read_exact(&mut head).await.unwrap();
+            let mut methods = vec![0u8; head[1] as usize];
+            client.read_exact(&mut methods).await.unwrap();
+            client.write_all(&[0x05, 0x02]).await.unwrap();
+            let mut vu = [0u8; 2];
+            client.read_exact(&mut vu).await.unwrap();
+            let mut uname = vec![0u8; vu[1] as usize];
+            client.read_exact(&mut uname).await.unwrap();
+            let mut plen = [0u8; 1];
+            client.read_exact(&mut plen).await.unwrap();
+            let mut passwd = vec![0u8; plen[0] as usize];
+            client.read_exact(&mut passwd).await.unwrap();
+            client.write_all(&[0x01, 0x00]).await.unwrap();
+            let mut head = [0u8; 5];
+            client.read_exact(&mut head).await.unwrap();
+            let mut name = vec![0u8; head[4] as usize];
+            client.read_exact(&mut name).await.unwrap();
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await.unwrap();
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            users.send(String::from_utf8(uname).unwrap()).unwrap();
+            tokio::spawn(async move {
+                let mut byte = [0u8; 1];
+                let _ = client.read_exact(&mut byte).await;
+            });
+        }
+    }
+
+    /// A bound-then-dropped listener's address: connecting to it is refused,
+    /// so any code path that touches it turns into a visible error.
+    async fn refused_addr() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    /// A credentialed connect verifies the daemon's isolation config over
+    /// the control port exactly once per connector, then dials with the
+    /// session credential as usual.
+    #[tokio::test]
+    async fn session_connect_verifies_isolation_once_then_dials() {
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_addr = control.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn(fake_control_isolation(
+            control,
+            "250 SocksPort=9050\r\n",
+            hits.clone(),
+        ));
+        let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        let (users_tx, mut users_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(fake_socks_authed(socks, users_tx));
+
+        let session = fungi_transport::SessionId::generate();
+        let connector = TorTransport::new(TorConfig {
+            socks_addr,
+            control_addr,
+            ..TorConfig::default()
+        })
+        .connector_for(&session);
+        let addr = OnionAddr::new(format!("{:a<56}.onion", "x"), 9735).unwrap();
+        let _c1 = connector.connect(&addr).await.unwrap();
+        let _c2 = connector.connect(&addr).await.unwrap();
+
+        assert_eq!(users_rx.recv().await.unwrap(), session.to_string());
+        assert_eq!(users_rx.recv().await.unwrap(), session.to_string());
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the isolation config is verified once per connector, not per dial"
+        );
+    }
+
+    /// A daemon that disables per-credential isolation fails the credentialed
+    /// connect with an error naming the flag, instead of silently dialing
+    /// onto shared circuits.
+    #[tokio::test]
+    async fn session_connect_fails_fast_when_daemon_disables_isolation() {
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_addr = control.local_addr().unwrap();
+        tokio::spawn(fake_control_isolation(
+            control,
+            "250 SocksPort=9050 NoIsolateSOCKSAuth\r\n",
+            Default::default(),
+        ));
+
+        let connector = TorTransport::new(TorConfig {
+            socks_addr: refused_addr().await,
+            control_addr,
+            ..TorConfig::default()
+        })
+        .connector_for(&fungi_transport::SessionId::generate());
+        let addr = OnionAddr::new(format!("{:a<56}.onion", "x"), 9735).unwrap();
+        let err = connector.connect(&addr).await.unwrap_err();
+        assert!(
+            err.to_string().contains("NoIsolateSOCKSAuth"),
+            "the check must fail before the dial, got: {err}"
+        );
+    }
+
+    /// The default connector carries no credential, so it never touches the
+    /// control port: with the control address refusing connections, the dial
+    /// still goes through.
+    #[tokio::test]
+    async fn default_connector_dials_without_touching_the_control_port() {
+        let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut client, _) = socks.accept().await.unwrap();
+            let mut greet = [0u8; 2];
+            client.read_exact(&mut greet).await.unwrap();
+            let mut methods = vec![0u8; greet[1] as usize];
+            client.read_exact(&mut methods).await.unwrap();
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+            let mut head = [0u8; 5];
+            client.read_exact(&mut head).await.unwrap();
+            let mut name = vec![0u8; head[4] as usize];
+            client.read_exact(&mut name).await.unwrap();
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await.unwrap();
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let _ = client.read_exact(&mut byte).await;
+        });
+
+        let connector = TorTransport::new(TorConfig {
+            socks_addr,
+            control_addr: refused_addr().await,
+            ..TorConfig::default()
+        })
+        .connector();
+        let addr = OnionAddr::new(format!("{:a<56}.onion", "x"), 9735).unwrap();
+        connector.connect(&addr).await.unwrap();
+    }
 
     /// Fake SOCKS proxy: accept one client, do the server side of the
     /// handshake (no byte assertions — socks5.rs tests own those), then
@@ -316,7 +514,6 @@ mod tests {
         ));
     }
 
-    use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;
 
     /// A valid v3-form service id: a readable prefix padded to 56 base32
