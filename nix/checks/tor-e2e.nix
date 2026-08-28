@@ -16,8 +16,9 @@
         # The onion dial happens in the disaster-SRV window, before the first
         # real shared-random value publishes, so the script finishes in minutes
         # rather than waiting out the ~48-min commit+reveal cycle. Keep a margin
-        # over that so a stuck dial fails fast instead of hanging.
-        globalTimeout = 1800;
+        # over that so a stuck dial fails fast instead of hanging; the margin
+        # also covers the two extra per-session dials.
+        globalTimeout = 2400;
         nodes = let
           fingerprints = import ../tor-test-net/fingerprints.nix;
           torrc = import ../tor-test-net/torrc.nix { inherit fingerprints; };
@@ -101,13 +102,12 @@
 
           start_all()
 
-          # Phase 1: authorities up and voting.
           for da in [da1, da2, da3]:
               da.wait_for_unit("tor.service")
           da1.wait_until_succeeds("curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus >/dev/null", timeout=300)
 
-          # Phase 2: relays join; consensus lists the 3 DAs + 6 relays (>=8, so
-          # one slow node does not fail the gate).
+          # The consensus gate is >=8 of the 9 nodes (3 DAs + 6 relays), so one
+          # slow node does not fail it.
           for r in [relay1, relay2, relay3, relay4, relay5, relay6]:
               r.wait_for_unit("tor.service")
           da1.wait_until_succeeds(
@@ -144,7 +144,6 @@
           netfile = "\n".join(lines)
           peer_arti.succeed(f"printf '%s\\n' {shlex.quote(netfile)} > /tmp/private-net")
 
-          # Phase 3: SOCKS5h listens, arti dials.
           peer_socks.wait_for_unit("tor.service")
           peer_socks.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
           peer_socks.succeed(
@@ -172,16 +171,38 @@
           peer_socks.execute("cat /tmp/listen.err >&2 || true")
           peer_socks.execute("pkill -f 'harness listen' || true")
 
-          # Phase 4: arti listens, SOCKS5h dials.
+          # The listener must outlive its first peer: it serves the default
+          # dial below plus the two session dials after it, sequentially.
           peer_arti.succeed(
-              f"({e2e} listen --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-listen --virt-port 9735 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
+              f"({e2e} listen --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-listen --virt-port 9735 --peers 3 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_arti.wait_until_succeeds("grep -q READY /tmp/listen.log", timeout=600)
           onion2 = peer_arti.succeed("grep ONION= /tmp/listen.log").strip().split("=", 1)[1]
-          # Same settling as Phase 3: let the arti onion service publish and the
-          # net stabilize before socks5h dials it.
+          # Same settling as the socks5h onion above: let the arti onion service
+          # publish and the net stabilize before socks5h dials it.
           peer_arti.sleep(90)
           peer_socks.wait_until_succeeds(f"{e2e} dial --plugin {socks5h_plugin} {onion2}", timeout=900)
+
+          # The session id's text form is the SOCKS username, and the daemon
+          # (IsolateSOCKSAuth, on by default) must keep distinct credentials
+          # on distinct circuits. circuit-status reports each circuit's
+          # SOCKS_USERNAME, and circuits outlive their streams, so the
+          # separation is asserted post-facto with no timing race. The arti
+          # side has no equivalent window: nothing stable enumerates its
+          # circuits, so its isolation stays covered by the offline
+          # token-wiring tests.
+          for sess in ["4242-1", "4242-2"]:
+              peer_socks.wait_until_succeeds(
+                  f"{e2e} dial --plugin {socks5h_plugin} --session {sess} {onion2}", timeout=300
+              )
+          status = peer_socks.succeed(
+              "printf 'AUTHENTICATE\\r\\nGETINFO circuit-status\\r\\nQUIT\\r\\n' | nc -w 5 127.0.0.1 9051"
+          )
+          assert 'SOCKS_USERNAME="4242-1"' in status, f"no circuit for session 4242-1:\n{status}"
+          assert 'SOCKS_USERNAME="4242-2"' in status, f"no circuit for session 4242-2:\n{status}"
+          for line in status.splitlines():
+              assert not ("4242-1" in line and "4242-2" in line), f"sessions share a circuit:\n{line}"
+
           # As with the socks5h listener above: the dialer's OK is the proof, so
           # the arti echo listener need not exit cleanly. Record its log, stop it.
           peer_arti.execute("cat /tmp/listen.err >&2 || true")
