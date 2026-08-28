@@ -16,6 +16,22 @@
 //! address the Tor backends use; [`testkit`] holds the transport-agnostic
 //! conformance suite every `Channel` implementation is expected to pass.
 //!
+//! # Channel kinds
+//!
+//! Channels are split along two axes so the compiler keeps distinct kinds
+//! apart — you can never pass one where another is meant:
+//!
+//! - **anonymous vs attributable** — whether a received message names its
+//!   sender. [`Channel`] is anonymous (the peer is unidentified);
+//!   [`AttributableChannel`] names the sender via [`SenderId`]. A P2P
+//!   attributable channel has one peer, so the sender is known once, not per
+//!   message.
+//! - **P2P vs broadcast** — one peer, or a pub-sub set. Both channels above
+//!   are P2P. The broadcast counterparts are built on top of P2P by gossip,
+//!   so they arrive with the gossip layer (a later milestone), where
+//!   per-message attribution (a different sender per broadcast message) makes
+//!   sense; they are deliberately not defined here yet.
+//!
 //! Real transports live in their own crates: `fungi-transport-socks5h`
 //! (external tor daemon) and `fungi-transport-arti` (in-process arti).
 
