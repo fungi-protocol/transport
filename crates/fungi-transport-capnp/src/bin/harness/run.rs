@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use fungi_transport::harness::{dial_sequence, echo_one_peer};
-use fungi_transport::{Connector, ListenParams, Listener, OnionAddr, Transport};
+use fungi_transport::{Connector, ListenParams, Listener, OnionAddr, SessionId, Transport};
 
 /// Bounded wait for every network step: the VM test must fail, not hang.
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -30,8 +30,15 @@ pub(crate) struct Cli {
 }
 
 pub(crate) enum Cmd {
-    Listen { virt_port: u16 },
-    Dial { target: OnionAddr },
+    Listen {
+        virt_port: u16,
+    },
+    Dial {
+        target: OnionAddr,
+        /// Session to dial under; `None` dials on the backend's shared
+        /// default connector.
+        session: Option<SessionId>,
+    },
 }
 
 pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
@@ -42,10 +49,19 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut target = None;
     let mut plugin = None;
     let mut state_dir = None;
+    let mut session = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--private-net" => {
                 private_net = Some(it.next().ok_or("--private-net needs a file")?.into())
+            }
+            "--session" => {
+                session = Some(
+                    it.next()
+                        .ok_or("--session needs a pid-seq id")?
+                        .parse::<SessionId>()
+                        .map_err(|e| e.to_string())?,
+                )
             }
             "--virt-port" => {
                 virt_port = Some(
@@ -78,6 +94,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
         },
         "dial" => Cmd::Dial {
             target: target.ok_or("dial needs a host:port target")?,
+            session,
         },
         other => return Err(format!("unknown subcommand {other}")),
     };
@@ -178,7 +195,13 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
             )
             .await
         }
-        Cmd::Dial { target } => run_dial(transport.connector(), target).await,
+        Cmd::Dial { target, session } => {
+            let connector = match session {
+                Some(session) => transport.connector_for(session),
+                None => transport.connector(),
+            };
+            run_dial(connector, target).await
+        }
     }
 }
 
@@ -235,6 +258,54 @@ mod tests {
             cli.plugin,
             std::path::Path::new("/nix/store/xxx/bin/fungi-arti-plugin")
         );
+    }
+
+    /// `--session <pid-seq>` binds the dial to that session; malformed ids
+    /// fail the parse rather than silently dialing unbound.
+    #[test]
+    fn cli_parsing_accepts_and_validates_session() {
+        let args = |sess: &str| {
+            [
+                "fungi-harness",
+                "dial",
+                "--plugin",
+                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "--session",
+                sess,
+                &format!("{:a<56}.onion:9735", "host"),
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        let cli = parse_args(args("4242-1")).unwrap();
+        match cli.cmd {
+            Cmd::Dial { session, .. } => {
+                assert_eq!(session, Some("4242-1".parse().unwrap()));
+            }
+            _ => panic!("expected a dial command"),
+        }
+        assert!(parse_args(args("not-an-id")).is_err());
+    }
+
+    /// Without `--session`, the dial stays on the shared default connector.
+    #[test]
+    fn cli_parsing_defaults_to_no_session() {
+        let cli = parse_args(
+            [
+                "fungi-harness",
+                "dial",
+                "--plugin",
+                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                &format!("{:a<56}.onion:9735", "host"),
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        match cli.cmd {
+            Cmd::Dial { session, .. } => assert_eq!(session, None),
+            _ => panic!("expected a dial command"),
+        }
     }
 
     /// The generic flags parse without a backend selector: `--state-dir` and
