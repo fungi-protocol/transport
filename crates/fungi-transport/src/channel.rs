@@ -80,6 +80,37 @@ pub trait Channel: Send {
 /// types so the compiler keeps them apart (you cannot pass one where the other
 /// is expected). Both are P2P; the broadcast counterparts arrive with the
 /// broadcast/gossip layer.
+///
+/// The separation is enforced by the type system, not convention. An
+/// attributable channel is not accepted where an anonymous [`Channel`] is
+/// required:
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableChannel, Channel};
+///
+/// fn wants_anonymous(_: impl Channel) {}
+///
+/// fn misuse(attributable: impl AttributableChannel) {
+///     // error[E0277]: the trait bound `impl AttributableChannel: Channel`
+///     // is not satisfied — the two channel kinds are distinct types.
+///     wants_anonymous(attributable);
+/// }
+/// ```
+///
+/// Nor is an anonymous channel accepted where an attributable one is required
+/// (it names no sender):
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableChannel, Channel};
+///
+/// fn wants_attributable(_: impl AttributableChannel) {}
+///
+/// fn misuse(anonymous: impl Channel) {
+///     // error[E0277]: the trait bound `impl Channel: AttributableChannel`
+///     // is not satisfied.
+///     wants_attributable(anonymous);
+/// }
+/// ```
 pub trait AttributableChannel: Send {
     /// The sender identity type this channel attributes messages to.
     type Sender: SenderId;
