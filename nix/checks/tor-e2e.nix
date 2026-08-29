@@ -15,10 +15,13 @@
         name = "fungi-tor-e2e";
         # The onion dial happens in the disaster-SRV window, before the first
         # real shared-random value publishes, so the script finishes in minutes
-        # rather than waiting out the ~48-min commit+reveal cycle. Keep a margin
-        # over that so a stuck dial fails fast instead of hanging; the margin
-        # also covers the two extra per-session dials.
-        globalTimeout = 2400;
+        # rather than waiting out the ~48-min commit+reveal cycle. The per-step
+        # timeouts below are the fail-fast mechanism — a stuck dial fails at its
+        # own deadline; globalTimeout is only the outer backstop. Keep it above
+        # the sum of the per-step budgets, so a slow-but-passing run fails at a
+        # clean per-step timeout rather than being cut off mid-step as an opaque
+        # global timeout.
+        globalTimeout = 5400;
         nodes = let
           fingerprints = import ../tor-test-net/fingerprints.nix;
           torrc = import ../tor-test-net/torrc.nix { inherit fingerprints; };
