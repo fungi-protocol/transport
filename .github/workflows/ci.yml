@@ -42,4 +42,9 @@ jobs:
           tool-cache: false
           large-packages: false
       - uses: DeterminateSystems/nix-installer-action@v22
+      # Evaluate the whole flake before the expensive VM build: a flake eval
+      # error (a broken check or output the fast-checks job does not touch)
+      # fails here in seconds instead of after booting the VMs. This job runs
+      # nix anyway, so the guard costs nothing extra.
+      - run: nix flake check --no-build -L
       - run: nix build -L .#checks.x86_64-linux.tor-e2e
