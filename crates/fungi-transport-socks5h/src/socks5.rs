@@ -42,6 +42,24 @@ async fn authenticate(stream: &mut TcpStream, username: &str) -> Result<(), Conn
     Ok(())
 }
 
+/// Classify a SOCKS5 CONNECT reply code (RFC 1928 reply field). `Ok(())` is
+/// success. General server failure (`0x01`) and the network/host-unreachable
+/// and connection-refused codes (`0x03`-`0x05`) become
+/// [`ConnectError::Unreachable`]: through tor these mean the peer could not be
+/// reached (`0x01` covers a failed onion descriptor lookup or rendezvous), the
+/// consumer's cue to retry later. This matches the arti backend's classifier,
+/// so retry semantics do not depend on which backend is plugged. The remaining
+/// codes are genuine protocol/policy failures and stay opaque.
+fn classify_connect_reply(code: u8) -> Result<(), ConnectError> {
+    match code {
+        0x00 => Ok(()),
+        0x01 | 0x03..=0x05 => Err(ConnectError::Unreachable),
+        code => Err(ConnectError::Transport(
+            format!("SOCKS5 CONNECT failed with reply code {code}").into(),
+        )),
+    }
+}
+
 /// Open a TCP stream to `host:port` through the SOCKS5 proxy at `proxy`.
 /// The hostname travels to the proxy unresolved (SOCKS5h).
 ///
@@ -124,17 +142,7 @@ pub(crate) async fn connect(
             "SOCKS5 reply with wrong version byte".into(),
         ));
     }
-    match head[1] {
-        0x00 => {}
-        // network unreachable / host unreachable / connection refused: the
-        // peer cannot be reached — the consumer's cue to try later.
-        0x03..=0x05 => return Err(ConnectError::Unreachable),
-        code => {
-            return Err(ConnectError::Transport(
-                format!("SOCKS5 CONNECT failed with reply code {code}").into(),
-            ));
-        }
-    }
+    classify_connect_reply(head[1])?;
     // Consume the bound address so the stream starts at tunnel byte 0.
     let addr_len = match head[3] {
         0x01 => 4,
@@ -313,13 +321,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn general_failure_maps_to_transport() {
+    async fn general_failure_maps_to_unreachable() {
+        // Through tor, a general server failure on CONNECT is a failed onion
+        // lookup/rendezvous — a reachability condition, same as arti reports.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap();
         let server = tokio::spawn(serve_one(listener, "sad.onion", 1, 0x01));
         let err = connect(proxy, "sad.onion", 1, None).await;
-        assert!(matches!(err, Err(ConnectError::Transport(_))));
+        assert!(matches!(err, Err(ConnectError::Unreachable)));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn connect_reply_classification() {
+        use super::classify_connect_reply;
+        assert!(classify_connect_reply(0x00).is_ok());
+        for code in [0x01, 0x03, 0x04, 0x05] {
+            assert!(
+                matches!(classify_connect_reply(code), Err(ConnectError::Unreachable)),
+                "reply code {code:#04x} should be Unreachable"
+            );
+        }
+        for code in [0x02, 0x06, 0x07, 0x08] {
+            assert!(
+                matches!(
+                    classify_connect_reply(code),
+                    Err(ConnectError::Transport(_))
+                ),
+                "reply code {code:#04x} should be Transport"
+            );
+        }
     }
 
     /// The 255-byte hostname guard fires before the proxy is ever dialed.
