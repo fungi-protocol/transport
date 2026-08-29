@@ -11,7 +11,8 @@
   };
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
+      # x86_64-darwin is omitted: nixpkgs 26.11 dropped support for it.
+      systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
       # The VM test and each transport are their own flake-parts modules.
       imports = [
         ./nix/checks/tor-e2e.nix
