@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use fungi_transport::framed::DEFAULT_MAX_MSG_LEN;
 use fungi_transport_arti::LazyArtiTransport;
-use fungi_transport_capnp::{PluginFixtures, serve_plugin_with};
+use fungi_transport_capnp::{PluginFixtures, serve_plugin_with_stdio};
 
 /// Read a directory path from `var`, falling back to `<temp>/default_leaf`.
 fn env_dir(var: &str, default_leaf: &str) -> PathBuf {
@@ -54,22 +54,13 @@ fn main() {
     let state_dir = env_dir("FUNGI_STATE_DIR", "fungi-arti-state");
     let cache_dir = env_dir("FUNGI_CACHE_DIR", "fungi-arti-cache");
 
-    // capnp-rpc is `!Send`; drive it (and the deferred bootstrap) on a
-    // current-thread runtime under a `LocalSet`, as every plugin server must.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("building the plugin runtime");
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, async {
-        // Install a crypto provider explicitly: auto-install only fires when a
-        // single provider is in the graph, so make the choice unambiguous.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+    // Install a crypto provider explicitly: auto-install only fires when a
+    // single provider is in the graph, so make the choice unambiguous.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let transport = LazyArtiTransport::new(state_dir, cache_dir, DEFAULT_MAX_MSG_LEN);
-        let fixtures = ArtiFixtures {
-            transport: transport.clone(),
-        };
-        serve_plugin_with(transport, fixtures, tokio::io::stdin(), tokio::io::stdout()).await;
-    });
+    let transport = LazyArtiTransport::new(state_dir, cache_dir, DEFAULT_MAX_MSG_LEN);
+    let fixtures = ArtiFixtures {
+        transport: transport.clone(),
+    };
+    serve_plugin_with_stdio(transport, fixtures);
 }

@@ -9,7 +9,7 @@
 //! shown to report the failure as unreachable.
 
 use fungi_transport::mem::{MemConfig, MemTransport};
-use fungi_transport_capnp::serve_plugin;
+use fungi_transport_capnp::serve_plugin_stdio;
 
 fn main() {
     if std::env::args().nth(1).is_some() {
@@ -17,17 +17,5 @@ fn main() {
         std::process::exit(1);
     }
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("building the plugin runtime");
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, async {
-        serve_plugin(
-            MemTransport::new(MemConfig::default()),
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-        )
-        .await;
-    });
+    serve_plugin_stdio(MemTransport::new(MemConfig::default()));
 }

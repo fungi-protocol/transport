@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 
-use fungi_transport_capnp::serve_plugin;
+use fungi_transport_capnp::serve_plugin_stdio;
 use fungi_transport_socks5h::{TorConfig, TorTransport};
 
 /// Read a `SocketAddr` from `var`, falling back to `default` when unset. A set
@@ -36,19 +36,5 @@ fn main() {
         ..TorConfig::default()
     };
 
-    // capnp-rpc is `!Send`; drive it on a current-thread runtime under a
-    // `LocalSet`, as every plugin server must.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("building the plugin runtime");
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, async {
-        serve_plugin(
-            TorTransport::new(cfg),
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-        )
-        .await;
-    });
+    serve_plugin_stdio(TorTransport::new(cfg));
 }

@@ -1545,3 +1545,36 @@ where
     let rpc_system = RpcSystem::new(Box::new(network), Some(client.client));
     let _ = rpc_system.await;
 }
+
+/// Serve `backend` as a plugin over this process's stdin/stdout, blocking until
+/// the client disconnects.
+///
+/// capnp-rpc is `!Send`, so a plugin binary must drive [`serve_plugin`] on a
+/// current-thread runtime under a `LocalSet`; this packages that driver so each
+/// backend binary need not repeat it. Use [`serve_plugin_with_stdio`] when the
+/// backend also exposes [`PluginFixtures`].
+pub fn serve_plugin_stdio<T>(backend: T)
+where
+    T: Transport + 'static,
+    T::Addr: FromStr + Display,
+{
+    serve_plugin_with_stdio(backend, NoopFixtures)
+}
+
+/// Like [`serve_plugin_stdio`], but with a backend-provided [`PluginFixtures`]
+/// exposed on the plugin's `TestFixtures` capability.
+pub fn serve_plugin_with_stdio<T, F>(backend: T, fixtures: F)
+where
+    T: Transport + 'static,
+    T::Addr: FromStr + Display,
+    F: PluginFixtures + 'static,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("building the plugin runtime");
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async {
+        serve_plugin_with(backend, fixtures, tokio::io::stdin(), tokio::io::stdout()).await;
+    });
+}
