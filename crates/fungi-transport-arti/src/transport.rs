@@ -68,8 +68,13 @@ pub struct ArtiTransport {
     pub(crate) max_msg_len: usize,
     /// One isolation token per logical session, so repeated `connector_for`
     /// calls with the same session reuse a token (and thus a circuit group)
-    /// while distinct sessions never do. Grows by one small entry per
-    /// session; sessions per transport are few, so no eviction is needed.
+    /// while distinct sessions never do. The map is inherent to that guarantee:
+    /// an `IsolationToken` is a fresh unique value, not derivable from the
+    /// session, so it has to be remembered. It grows one small entry per
+    /// distinct session and is never evicted — evicting a live session would
+    /// remint a different token and split its circuit group. It therefore stays
+    /// bounded only while sessions track a peer's long-lived logical
+    /// identities, not ephemeral per-dial ids.
     sessions:
         std::sync::Mutex<std::collections::HashMap<fungi_transport::SessionId, IsolationToken>>,
 }
