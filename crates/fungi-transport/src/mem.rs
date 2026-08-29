@@ -31,8 +31,8 @@ pub enum Delivery {
 /// Knobs for the in-memory pipe.
 #[derive(Debug, Clone, Default)]
 pub struct MemConfig {
-    /// Per-direction buffer capacity; `None` = 1 (slow transport). Must be
-    /// >= 1 if set (tokio mpsc panics on 0).
+    /// Per-direction buffer capacity; `None` = 1 (slow transport). A `Some(0)`
+    /// is clamped to 1 rather than panicking (tokio mpsc rejects a 0 capacity).
     pub capacity: Option<usize>,
     /// Maximum message size; larger sends fail with [`SendError::TooLarge`].
     pub max_msg_len: Option<usize>,
@@ -74,7 +74,7 @@ impl MemChannel {
 
 /// Create a connected pair: whatever A sends, B receives, and vice versa.
 pub fn duplex(cfg: MemConfig) -> (MemChannel, MemChannel) {
-    let cap = cfg.capacity.unwrap_or(1);
+    let cap = cfg.capacity.unwrap_or(1).max(1);
     let (tx_ab, rx_ab) = mpsc::channel(cap);
     let (tx_ba, rx_ba) = mpsc::channel(cap);
     let mk = |tx, rx| MemChannel {
@@ -293,6 +293,18 @@ mod tests {
     use crate::error::SendError;
     use crate::testkit;
     use std::time::Duration;
+
+    /// A `Some(0)` capacity is clamped to 1, not passed to `mpsc::channel`
+    /// (which panics on 0), and yields a usable channel.
+    #[tokio::test]
+    async fn zero_capacity_is_clamped_not_a_panic() {
+        let (mut a, mut b) = duplex(MemConfig {
+            capacity: Some(0),
+            ..MemConfig::default()
+        });
+        a.send(b"hi").await.unwrap();
+        assert_eq!(b.recv().await.unwrap(), b"hi");
+    }
 
     // CONFORMANCE (trait contract) — delegated to the generic testkit; the
     // mock is the testkit's first client.
