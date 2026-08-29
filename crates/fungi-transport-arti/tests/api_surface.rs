@@ -69,6 +69,7 @@ async fn service_surface(client: TorClient<PreferredRuntime>) {
     futures_util::pin_mut!(incoming);
     if let Some(req) = incoming.next().await {
         use tor_cell::relaycell::msg::Connected;
+        use tor_cell::relaycell::msg::{End, EndReason};
         use tor_proto::stream::IncomingStreamRequest;
         match req.request() {
             IncomingStreamRequest::Begin(begin) => {
@@ -76,7 +77,7 @@ async fn service_surface(client: TorClient<PreferredRuntime>) {
                 let _ = req.accept(Connected::new_empty()).await;
             }
             _ => {
-                let _ = req.shutdown_circuit();
+                let _ = req.reject(End::new_with_reason(EndReason::DONE)).await;
             }
         }
     }

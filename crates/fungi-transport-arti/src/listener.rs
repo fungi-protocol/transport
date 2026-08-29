@@ -8,7 +8,7 @@ use fungi_transport::framed::FramedChannel;
 use fungi_transport::{ConnectError, Listener, OnionAddr};
 use futures_util::{Stream, StreamExt};
 use safelog::DisplayRedacted;
-use tor_cell::relaycell::msg::Connected;
+use tor_cell::relaycell::msg::{Connected, End, EndReason};
 use tor_hsservice::{RunningOnionService, StreamRequest};
 use tor_proto::stream::IncomingStreamRequest;
 
@@ -115,9 +115,13 @@ impl Listener for ArtiListener {
                     return Ok(FramedChannel::new(stream, self.max_msg_len));
                 }
                 _ => {
-                    // Wrong port or non-Begin request: refuse and keep
-                    // listening.
-                    let _ = req.shutdown_circuit();
+                    // Wrong port or non-Begin request: reject just this stream
+                    // and keep listening. A rendezvous circuit multiplexes many
+                    // streams, so tearing the circuit down would also kill the
+                    // peer's unrelated live streams; rejecting the single stream
+                    // leaves them intact. END with DONE keeps this
+                    // indistinguishable from other onion services.
+                    let _ = req.reject(End::new_with_reason(EndReason::DONE)).await;
                 }
             }
         }
