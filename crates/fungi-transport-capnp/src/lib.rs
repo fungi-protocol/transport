@@ -312,13 +312,19 @@ where
                                 let _ = reply.send(Ok(id));
                             }
                             Err(e) => {
-                                let _ = reply.send(Err(ConnectError::Transport(e.into())));
+                                let _ = reply.send(Err(map_connect_error(e)));
                             }
                         },
-                        Err(e) => {
+                        // Only `Unimplemented` means an older plugin lacks this
+                        // method; every other failure (a dead peer, a backend
+                        // error) is a real transport failure, not version skew.
+                        Err(e) if matches!(e.kind, capnp::ErrorKind::Unimplemented) => {
                             let _ = reply.send(Err(ConnectError::Transport(
                                 format!("plugin without session support: {e}").into(),
                             )));
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(map_connect_error(e)));
                         }
                     }
                 });
