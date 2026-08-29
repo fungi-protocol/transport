@@ -55,27 +55,52 @@ async fn read_reply_line(conn: &mut BufReader<TcpStream>) -> Result<String, Conn
     Ok(line.trim_end().to_owned())
 }
 
+/// One classified line of a control-port reply. Per the control-spec reply
+/// grammar, `250-<text>` is a continuation line and `250 <text>` is the final
+/// line; anything else — a non-250 code, or a bare `250` with no separator — is
+/// unexpected, so callers treat it as an error (fail-closed). This is the single
+/// place that grammar is parsed; each caller decides what a continuation, or a
+/// given final payload, means for its command.
+enum ReplyLine<'a> {
+    /// A `250-` continuation line, carrying the text after the prefix.
+    Continuation(&'a str),
+    /// The final `250 ` line, carrying the text after the prefix.
+    Final(&'a str),
+    /// A non-250 code or otherwise unexpected line. The caller reports the full
+    /// line it already holds, so no payload is carried here.
+    Other,
+}
+
+fn classify_reply_line(line: &str) -> ReplyLine<'_> {
+    if let Some(rest) = line.strip_prefix("250-") {
+        ReplyLine::Continuation(rest)
+    } else if let Some(rest) = line.strip_prefix("250 ") {
+        ReplyLine::Final(rest)
+    } else {
+        // A bare `250` (no separator) is malformed per the control-spec reply
+        // grammar; classifying it as Other keeps the isolation check fail-closed.
+        ReplyLine::Other
+    }
+}
+
 /// Expect a single-line `250 OK`-style success reply. A `250-` continuation
 /// line here means the reply is multi-line where we expected exactly one —
 /// that is a protocol desync, not success, so it errors rather than being
-/// mistaken for `250`-prefixed success.
+/// mistaken for a `250`-prefixed success.
 async fn expect_ok(conn: &mut BufReader<TcpStream>) -> Result<(), ConnectError> {
     let line = read_reply_line(conn).await?;
-    if let Some(rest) = line.strip_prefix("250-") {
-        return Err(ConnectError::Transport(
+    match classify_reply_line(&line) {
+        ReplyLine::Final(_) => Ok(()),
+        ReplyLine::Continuation(rest) => Err(ConnectError::Transport(
             format!(
                 "control port desynchronized: expected a single-line reply but got a \
                  continuation line: 250-{rest}"
             )
             .into(),
-        ));
-    }
-    if line == "250" || line.starts_with("250 ") {
-        Ok(())
-    } else {
-        Err(ConnectError::Transport(
+        )),
+        ReplyLine::Other => Err(ConnectError::Transport(
             format!("control port replied: {line}").into(),
-        ))
+        )),
     }
 }
 
@@ -121,14 +146,14 @@ pub(crate) async fn verify_isolate_socks_auth(
     // written in the configuration, so every line is scanned.
     loop {
         let line = read_reply_line(&mut conn).await?;
-        let (payload, last) = if let Some(rest) = line.strip_prefix("250-") {
-            (rest, false)
-        } else if let Some(rest) = line.strip_prefix("250 ") {
-            (rest, true)
-        } else {
-            return Err(ConnectError::Transport(
-                format!("GETCONF SocksPort failed: {line}").into(),
-            ));
+        let (payload, last) = match classify_reply_line(&line) {
+            ReplyLine::Continuation(rest) => (rest, false),
+            ReplyLine::Final(rest) => (rest, true),
+            ReplyLine::Other => {
+                return Err(ConnectError::Transport(
+                    format!("GETCONF SocksPort failed: {line}").into(),
+                ));
+            }
         };
         // Values may arrive as a QuotedString, so quotes are stripped from
         // each token before comparing.
@@ -179,16 +204,22 @@ pub(crate) async fn create_onion(
     let mut service_id = None;
     loop {
         let line = read_reply_line(&mut conn).await?;
-        if let Some(id) = line.strip_prefix("250-ServiceID=") {
-            service_id = Some(id.to_owned());
-        } else if line.starts_with("250-") {
-            // Other continuation lines (e.g. PrivateKey) are ignored.
-        } else if line == "250 OK" {
-            break;
-        } else {
-            return Err(ConnectError::Transport(
-                format!("ADD_ONION failed: {line}").into(),
-            ));
+        match classify_reply_line(&line) {
+            // The ServiceID continuation carries the onion identity; other
+            // continuation lines (e.g. PrivateKey) are ignored.
+            ReplyLine::Continuation(rest) => {
+                if let Some(id) = rest.strip_prefix("ServiceID=") {
+                    service_id = Some(id.to_owned());
+                }
+            }
+            // Only `250 OK` ends the reply; any other final line or non-250
+            // code is a failure (reading another line would block forever).
+            ReplyLine::Final("OK") => break,
+            _ => {
+                return Err(ConnectError::Transport(
+                    format!("ADD_ONION failed: {line}").into(),
+                ));
+            }
         }
     }
     let service_id = service_id
