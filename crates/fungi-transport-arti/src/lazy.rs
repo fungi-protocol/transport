@@ -21,14 +21,27 @@ use tokio::sync::OnceCell;
 
 use crate::{ArtiConfig, ArtiConnector, ArtiListener, ArtiTransport, PrivateNet};
 
+/// The private-network descriptor to apply at bootstrap, plus a latch that
+/// closes once a bootstrap has begun. Both live under one lock so the
+/// "reject a late configure" check and the "read the descriptor" step cannot
+/// interleave: once `get` latches `reserved`, a racing `configure_private_net`
+/// is refused instead of setting a descriptor the one bootstrap already read
+/// past and would silently ignore.
+#[derive(Default)]
+struct Pending {
+    /// The descriptor to apply, or `None` to bootstrap onto the public network.
+    net: Option<String>,
+    /// Set when a bootstrap has begun; `configure_private_net` then fails.
+    reserved: bool,
+}
+
 /// Boot state shared by the lazy transport, its connectors, and the fixtures.
 struct LazyInner {
     /// The bootstrapped transport, built at most once on first use.
     booted: OnceCell<ArtiTransport>,
-    /// A private-network descriptor to apply before bootstrap, set through
-    /// [`LazyArtiTransport::configure_private_net`]. `None` bootstraps onto the
-    /// public network.
-    pending: Mutex<Option<String>>,
+    /// The pending private-network descriptor and its bootstrap latch, set
+    /// through [`LazyArtiTransport::configure_private_net`].
+    pending: Mutex<Pending>,
     state_dir: PathBuf,
     cache_dir: PathBuf,
     max_msg_len: usize,
@@ -39,9 +52,16 @@ impl LazyInner {
     async fn get(&self) -> Result<&ArtiTransport, ConnectError> {
         self.booted
             .get_or_try_init(|| async {
-                // Brief lock, cloned out before any await: the guard never
-                // crosses a suspension point, so this future stays `Send`.
-                let pending = self.pending.lock().unwrap().clone();
+                // Latch the bootstrap and read the descriptor under one lock,
+                // then drop the guard before any await: it never crosses a
+                // suspension point, so this future stays `Send`. Cloning (not
+                // taking) the descriptor keeps it for a retry if bootstrap
+                // fails and this closure runs again.
+                let pending = {
+                    let mut p = self.pending.lock().expect("arti lazy pending mutex");
+                    p.reserved = true;
+                    p.net.clone()
+                };
                 match pending {
                     Some(text) => {
                         let cfg = PrivateNet::parse(&text)
@@ -85,7 +105,7 @@ impl LazyArtiTransport {
         Self {
             inner: Arc::new(LazyInner {
                 booted: OnceCell::new(),
-                pending: Mutex::new(None),
+                pending: Mutex::new(Pending::default()),
                 state_dir,
                 cache_dir,
                 max_msg_len,
@@ -94,20 +114,27 @@ impl LazyArtiTransport {
     }
 
     /// Install a private-network descriptor to apply before the one bootstrap.
-    /// Must precede the first `connector`/`listen`; errors if arti has already
-    /// booted or the descriptor is invalid. This is the seam the plugin's
-    /// `TestFixtures.configurePrivateNet` drives.
+    /// Must precede the first `connector`/`listen`; errors if the descriptor is
+    /// invalid or if a bootstrap has already begun. The latch is set at
+    /// bootstrap START, not success, so the descriptor cannot be swapped in
+    /// after a failed bootstrap either — the first bootstrap commits the
+    /// network. This is the seam the plugin's `TestFixtures.configurePrivateNet`
+    /// drives.
     pub fn configure_private_net(&self, net_file: &[u8]) -> Result<(), String> {
-        if self.inner.booted.initialized() {
-            return Err("configure_private_net called after arti bootstrapped".into());
-        }
         let text = std::str::from_utf8(net_file)
             .map_err(|e| format!("private-net descriptor is not UTF-8: {e}"))?
             .to_owned();
         // Validate eagerly so a bad descriptor fails the fixture call, not the
         // later bootstrap.
         PrivateNet::parse(&text)?;
-        *self.inner.pending.lock().unwrap() = Some(text);
+        // Reject under the same lock the bootstrap latches: if a bootstrap has
+        // already begun, this descriptor would be ignored, so fail instead of
+        // silently accepting it.
+        let mut pending = self.inner.pending.lock().expect("arti lazy pending mutex");
+        if pending.reserved {
+            return Err("configure_private_net called after arti bootstrapped".into());
+        }
+        pending.net = Some(text);
         Ok(())
     }
 }
@@ -198,7 +225,20 @@ mod tests {
                    fallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 \
                    xGYRXQ2b1SDpLoNjKilDNzrqAX2XCEBEyYlVmIGSjTo 192.168.1.11:9001\n";
         assert!(t.configure_private_net(net.as_bytes()).is_ok());
-        assert!(t.inner.pending.lock().unwrap().is_some());
+        assert!(t.inner.pending.lock().unwrap().net.is_some());
+    }
+
+    /// Once a bootstrap has begun (which `get` latches before it awaits), a
+    /// late `configure_private_net` is refused rather than silently setting a
+    /// descriptor the one bootstrap has already read past.
+    #[test]
+    fn configure_after_bootstrap_latch_is_rejected() {
+        let t = lazy();
+        t.inner.pending.lock().unwrap().reserved = true;
+        let net = "authority testda 27102BC123E7AF1D4741AE047E160C91ADC76B21\n\
+                   fallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 \
+                   xGYRXQ2b1SDpLoNjKilDNzrqAX2XCEBEyYlVmIGSjTo 192.168.1.11:9001\n";
+        assert!(t.configure_private_net(net.as_bytes()).is_err());
     }
 
     /// A non-UTF-8 descriptor is rejected at the fixture call, not deferred.
