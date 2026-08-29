@@ -239,8 +239,10 @@ impl TorListener {
         &self.addr
     }
 
-    /// The local TCP port the daemon forwards inbound connections to.
-    /// Exposed for tests; real peers only ever see the onion address.
+    /// The local TCP port the daemon forwards inbound connections to. Only
+    /// tests need it — real peers see the onion address — so it is compiled out
+    /// of release builds, keeping its one `expect` off the production path.
+    #[cfg(test)]
     pub fn local_port(&self) -> u16 {
         self.local
             .local_addr()

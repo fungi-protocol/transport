@@ -41,7 +41,12 @@ fn io_err(e: std::io::Error) -> ConnectError {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02X}");
+    }
+    s
 }
 
 async fn read_reply_line(conn: &mut BufReader<TcpStream>) -> Result<String, ConnectError> {
