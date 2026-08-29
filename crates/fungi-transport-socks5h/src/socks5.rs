@@ -64,11 +64,12 @@ pub(crate) async fn connect(
     }
     let mut stream = TcpStream::connect(proxy).await.map_err(io_err)?;
 
-    // Greeting: offer no-auth, plus username/password (0x02) when a credential
-    // is present so the daemon can pick it for isolation.
+    // Greeting: a credentialed connect offers ONLY username/password (0x02), so
+    // a proxy that will not isolate answers 0xFF and we fail loudly rather than
+    // silently riding shared circuits. An unisolated connect offers no-auth.
     match credential {
         None => stream.write_all(&[0x05, 0x01, 0x00]).await,
-        Some(_) => stream.write_all(&[0x05, 0x02, 0x00, 0x02]).await,
+        Some(_) => stream.write_all(&[0x05, 0x01, 0x02]).await,
     }
     .map_err(io_err)?;
     let mut chosen = [0u8; 2];
@@ -78,9 +79,30 @@ pub(crate) async fn connect(
             "SOCKS5 greeting reply with wrong version byte".into(),
         ));
     }
-    match chosen[1] {
-        0x00 => {} // no-auth selected: nothing more to do
-        0x02 => authenticate(&mut stream, credential.unwrap_or_default()).await?,
+    match (chosen[1], credential) {
+        // no-auth selected on an unisolated connect: nothing more to do
+        (0x00, None) => {}
+        // no-auth on a credentialed connect would ride the daemon's shared
+        // circuits, silently losing the per-session isolation the credential
+        // exists to provide. We never offer no-auth when credentialed, so a
+        // conformant proxy cannot reach this; refuse rather than lose isolation.
+        (0x00, Some(_)) => {
+            return Err(ConnectError::Transport(
+                "SOCKS5 proxy selected no-auth for an isolated connection, which would \
+                 collapse per-session circuit isolation"
+                    .into(),
+            ));
+        }
+        // username/password selected and we offered it: authenticate
+        (0x02, Some(cred)) => authenticate(&mut stream, cred).await?,
+        // username/password selected though only a credentialed connect
+        // offers it — a conformant proxy cannot reach this; refuse rather
+        // than authenticate with an empty credential we never intended.
+        (0x02, None) => {
+            return Err(ConnectError::Transport(
+                "SOCKS5 proxy selected an auth method that was not offered".into(),
+            ));
+        }
         _ => {
             return Err(ConnectError::Transport(
                 "SOCKS5 proxy selected no acceptable auth method".into(),
@@ -242,6 +264,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(user_rx.await.unwrap(), "1234-7");
+        server.await.unwrap();
+    }
+
+    /// A credentialed connect must fail if the proxy selects no-auth: proceeding
+    /// would ride the daemon's shared circuits and silently lose isolation.
+    #[tokio::test]
+    async fn no_auth_on_a_credentialed_connect_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut head = [0u8; 2];
+            s.read_exact(&mut head).await.unwrap();
+            let mut methods = vec![0u8; head[1] as usize];
+            s.read_exact(&mut methods).await.unwrap();
+            // Misbehave: select no-auth though only user/pass was offered.
+            s.write_all(&[0x05, 0x00]).await.unwrap();
+        });
+        let err = connect(proxy, "peer.onion", 9735, Some("1234-7")).await;
+        assert!(matches!(err, Err(ConnectError::Transport(_))));
         server.await.unwrap();
     }
 
