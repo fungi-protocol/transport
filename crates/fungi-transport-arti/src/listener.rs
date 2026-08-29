@@ -101,11 +101,12 @@ impl Listener for ArtiListener {
 
     async fn accept(&mut self) -> Result<Self::Channel, ConnectError> {
         loop {
-            let req = self
-                .incoming
-                .next()
-                .await
-                .ok_or(ConnectError::Unreachable)?;
+            let req = self.incoming.next().await.ok_or_else(|| {
+                // The incoming stream ending means the onion service stopped
+                // producing rendezvous requests: this listener is done, not a
+                // peer being unreachable. Matches the socks5h accept side.
+                ConnectError::Transport("onion service stopped accepting connections".into())
+            })?;
             match req.request() {
                 IncomingStreamRequest::Begin(begin) if begin.port() == self.virt_port => {
                     let stream = req
