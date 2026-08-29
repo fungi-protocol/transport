@@ -194,8 +194,9 @@ mod tests {
     #[test]
     fn configure_private_net_accepts_a_valid_descriptor() {
         let t = lazy();
-        let net = "authority testda AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
-                   fallback RSAHEX EDBASE64 192.168.1.11:9001\n";
+        let net = "authority testda 27102BC123E7AF1D4741AE047E160C91ADC76B21\n\
+                   fallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 \
+                   xGYRXQ2b1SDpLoNjKilDNzrqAX2XCEBEyYlVmIGSjTo 192.168.1.11:9001\n";
         assert!(t.configure_private_net(net.as_bytes()).is_ok());
         assert!(t.inner.pending.lock().unwrap().is_some());
     }

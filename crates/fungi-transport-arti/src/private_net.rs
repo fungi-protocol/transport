@@ -12,26 +12,30 @@
 
 use std::path::Path;
 
+use std::net::SocketAddr;
+
 use arti_client::TorClientConfig;
 use arti_client::config::TorClientConfigBuilder;
 use arti_client::config::dir;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 use tor_llcrypto::pk::rsa::RsaIdentity;
 
-/// A single directory authority: a name (validated but unused by arti's parallel
-/// identity vectors) and its v3 identity in hex.
+/// A single directory authority's decoded v3 identity. arti holds parallel
+/// vectors of identities, not named authority objects, so the descriptor's
+/// name field is positional only. Identities are decoded at parse time, so a
+/// malformed descriptor is rejected there rather than at bootstrap.
 #[derive(Debug)]
 struct Authority {
-    name: String,
-    v3ident: String,
+    v3ident: RsaIdentity,
 }
 
-/// A single fallback directory cache: RSA + ed25519 identities and its ORPort.
+/// A single fallback directory cache: its decoded RSA + ed25519 identities and
+/// ORPort.
 #[derive(Debug)]
 struct Fallback {
-    rsa: String,
-    ed: String,
-    orport: String,
+    rsa: RsaIdentity,
+    ed: Ed25519Identity,
+    orport: SocketAddr,
 }
 
 /// A parsed private-network descriptor: the authorities and fallback caches a
@@ -55,20 +59,33 @@ impl PrivateNet {
             }
             let fields: Vec<&str> = line.split_whitespace().collect();
             match fields.as_slice() {
-                ["authority", name, v3ident] => {
-                    if !v3ident.chars().all(|c| c.is_ascii_hexdigit()) {
-                        return Err(format!("line {}: v3ident is not hex", n + 1));
-                    }
-                    authorities.push(Authority {
-                        name: (*name).to_owned(),
-                        v3ident: (*v3ident).to_owned(),
-                    });
+                ["authority", _name, v3ident] => {
+                    let v3ident = RsaIdentity::from_hex(v3ident).ok_or_else(|| {
+                        format!("line {}: v3ident is not a valid hex RSA identity", n + 1)
+                    })?;
+                    authorities.push(Authority { v3ident });
                 }
-                ["fallback", rsa, ed, orport] => fallbacks.push(Fallback {
-                    rsa: (*rsa).to_owned(),
-                    ed: (*ed).to_owned(),
-                    orport: (*orport).to_owned(),
-                }),
+                ["fallback", rsa, ed, orport] => {
+                    let rsa = RsaIdentity::from_hex(rsa).ok_or_else(|| {
+                        format!(
+                            "line {}: fallback rsa is not a valid hex RSA identity",
+                            n + 1
+                        )
+                    })?;
+                    let ed = Ed25519Identity::from_base64(ed).ok_or_else(|| {
+                        format!(
+                            "line {}: fallback ed is not a valid base64 ed25519 identity",
+                            n + 1
+                        )
+                    })?;
+                    let orport = orport.parse::<SocketAddr>().map_err(|e| {
+                        format!(
+                            "line {}: fallback orport is not a valid address: {e}",
+                            n + 1
+                        )
+                    })?;
+                    fallbacks.push(Fallback { rsa, ed, orport });
+                }
                 _ => return Err(format!("line {}: unrecognized directive", n + 1)),
             }
         }
@@ -89,28 +106,17 @@ impl PrivateNet {
     pub fn apply(&self, b: &mut TorClientConfigBuilder) -> Result<(), String> {
         let mut authorities = dir::AuthorityContacts::builder();
         for a in &self.authorities {
-            // The name is parsed and validated but unused in the apply step.
-            // (AuthorityContacts holds parallel vectors of identities, not named authority objects.)
-            let rsa_id = RsaIdentity::from_hex(&a.v3ident).ok_or_else(|| {
-                format!("failed to parse v3ident {}: invalid hex or length", a.name)
-            })?;
-            authorities.v3idents().push(rsa_id);
+            // The name is unused here: AuthorityContacts holds parallel vectors
+            // of identities, not named authority objects. Identities were
+            // decoded and validated at parse time.
+            authorities.v3idents().push(a.v3ident);
         }
 
         let mut fbs = Vec::new();
         for f in &self.fallbacks {
             let mut fb = dir::FallbackDir::builder();
-            let rsa_id = RsaIdentity::from_hex(&f.rsa)
-                .ok_or_else(|| "fallback rsa: invalid hex or length".to_string())?;
-            let ed_id = Ed25519Identity::from_base64(&f.ed)
-                .ok_or_else(|| "fallback ed: invalid base64 or length".to_string())?;
-            let orport_addr = f
-                .orport
-                .parse()
-                .map_err(|e: std::net::AddrParseError| format!("fallback orport: {e}"))?;
-
-            fb.rsa_identity(rsa_id).ed_identity(ed_id);
-            fb.orports().push(orport_addr);
+            fb.rsa_identity(f.rsa).ed_identity(f.ed);
+            fb.orports().push(f.orport);
             fbs.push(fb);
         }
 
@@ -190,6 +196,19 @@ fallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 xGYRXQ2b1SDpLoNjKilDNzrqAX2XCE
         assert!(PrivateNet::parse("authority only-two-fields\n").is_err());
         assert!(PrivateNet::parse("unknown x y z\n").is_err());
         assert!(PrivateNet::parse("authority da NOT-HEX\n").is_err());
+    }
+
+    /// Identities are validated at parse time, not deferred to bootstrap: a
+    /// well-formed line whose identity fields are the wrong length or encoding
+    /// is rejected by `parse`, so the fixture call fails, not the later boot.
+    #[test]
+    fn rejects_bad_identities_at_parse() {
+        // v3ident is valid hex but too short for a 20-byte RSA identity.
+        assert!(PrivateNet::parse("authority da AABBCC\nfallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 xGYRXQ2b1SDpLoNjKilDNzrqAX2XCEBEyYlVmIGSjTo 192.168.1.11:9001\n").is_err());
+        // fallback ed identity is not valid base64.
+        assert!(PrivateNet::parse("authority da 27102BC123E7AF1D4741AE047E160C91ADC76B21\nfallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 not-base64!!! 192.168.1.11:9001\n").is_err());
+        // fallback orport is not a socket address.
+        assert!(PrivateNet::parse("authority da 27102BC123E7AF1D4741AE047E160C91ADC76B21\nfallback 27102BC123E7AF1D4741AE047E160C91ADC76B21 xGYRXQ2b1SDpLoNjKilDNzrqAX2XCEBEyYlVmIGSjTo not-an-addr\n").is_err());
     }
 
     /// The parsed net applies onto a TorClientConfigBuilder without error.
