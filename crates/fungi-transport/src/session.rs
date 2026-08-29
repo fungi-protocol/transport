@@ -24,6 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// daemon never collide on a SOCKS credential (and thus a circuit); within a
 /// process, a monotonic counter separates sessions. It is deliberately NOT a
 /// secret — any local process already sits inside the daemon's trust base.
+///
+/// Uniqueness holds among CONCURRENTLY-LIVE processes: the counter resets at
+/// each start, so a `pid-seq` id is not stable across a restart, and a reused
+/// pid could remint an earlier id. Ids are therefore for live isolation, not
+/// for persisting and comparing across process lifetimes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId {
     pid: u32,
