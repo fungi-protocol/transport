@@ -11,7 +11,7 @@ use std::str::FromStr;
 /// so a held `OnionAddr` is always shaped like a real onion address. Only
 /// the form is checked; the checksum embedded in the base32 label is not
 /// verified.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OnionAddr {
     host: String,
     port: u16,
@@ -87,6 +87,19 @@ mod tests {
 
     fn valid_host() -> String {
         format!("{}.onion", "a".repeat(56))
+    }
+
+    /// The address is a lookup key: a peer set keys channels by it, so it must
+    /// hash. Equal addresses collide, distinct ones don't.
+    #[test]
+    fn usable_as_a_map_key() {
+        use std::collections::HashMap;
+        let a = OnionAddr::new(valid_host(), 9735).unwrap();
+        let b = OnionAddr::new(format!("{}.onion", "b".repeat(56)), 9735).unwrap();
+        let mut seen = HashMap::new();
+        seen.insert(a.clone(), 1);
+        assert_eq!(seen.get(&a), Some(&1));
+        assert_eq!(seen.get(&b), None);
     }
 
     #[test]

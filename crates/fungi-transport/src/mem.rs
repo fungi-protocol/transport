@@ -146,7 +146,7 @@ impl Channel for MemChannel {
 
 /// Address of an in-memory listener. Only one endpoint exists per
 /// [`network`], so this is a unit marker.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct MemAddr;
 
 impl std::fmt::Display for MemAddr {
