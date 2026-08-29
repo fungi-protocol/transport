@@ -51,7 +51,11 @@
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
             });
             fmt = craneLib.cargoFmt { inherit (commonArgs) src; };
-            doc = craneLib.cargoDoc (commonArgs // { inherit cargoArtifacts; });
+            doc = craneLib.cargoDoc (commonArgs // {
+              inherit cargoArtifacts;
+              # Deny rustdoc warnings so a broken intra-doc link fails the check.
+              env.RUSTDOCFLAGS = "-D warnings";
+            });
           };
         };
     };
