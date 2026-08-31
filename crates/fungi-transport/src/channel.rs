@@ -4,7 +4,11 @@
 //!
 //! `&mut self` on both methods means one channel object cannot send and
 //! receive concurrently — full-duplex consumers must wrap the channel in a
-//! task (see `examples/echo.rs`, scenario 2).
+//! task (see `examples/echo.rs`, scenario 2). This is deliberate: one
+//! object with one fate keeps channel death unambiguous and the plugin
+//! surface a single interface. A consumer that wants split ends (a gossip
+//! node driving many channels) builds them locally with two tasks and a
+//! queue — the split is a consumer pattern, not a trait boundary.
 
 use std::future::Future;
 
