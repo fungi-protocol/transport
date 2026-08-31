@@ -41,6 +41,18 @@ pub(crate) enum Cmd {
         /// default connector.
         session: Option<SessionId>,
     },
+    Gossip {
+        /// Listen side, when this node accepts inbound links.
+        virt_port: Option<u16>,
+        /// How many inbound links to accept before gossiping.
+        listen_peers: u16,
+        /// Outbound links to open, each with its own in-command retry.
+        dials: Vec<OnionAddr>,
+        /// This node's own message.
+        message: Vec<u8>,
+        /// Distinct messages (own included) that mean convergence.
+        expect: usize,
+    },
 }
 
 pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
@@ -53,6 +65,10 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut state_dir = None;
     let mut session = None;
     let mut peers = None;
+    let mut dials = Vec::new();
+    let mut message = None;
+    let mut expect = None;
+    let mut listen_peers = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--private-net" => {
@@ -84,6 +100,35 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
             }
             "--state-dir" => state_dir = Some(it.next().ok_or("--state-dir needs a path")?.into()),
             "--plugin" => plugin = Some(it.next().ok_or("--plugin needs a path")?.into()),
+            "--dial" => {
+                let raw = it.next().ok_or("--dial needs host:port")?;
+                let (host, port) = raw.rsplit_once(':').ok_or("--dial needs host:port")?;
+                dials.push(
+                    OnionAddr::new(
+                        host,
+                        port.parse()
+                            .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
+            }
+            "--listen-peers" => {
+                listen_peers = Some(
+                    it.next()
+                        .ok_or("--listen-peers needs a count")?
+                        .parse::<u16>()
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            "--message" => message = Some(it.next().ok_or("--message needs text")?.into_bytes()),
+            "--expect" => {
+                expect = Some(
+                    it.next()
+                        .ok_or("--expect needs a count")?
+                        .parse::<usize>()
+                        .map_err(|e| e.to_string())?,
+                )
+            }
             other if !other.starts_with("--") && target.is_none() => {
                 let (host, port) = other.rsplit_once(':').ok_or("target must be host:port")?;
                 target = Some(
@@ -107,6 +152,13 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
         "dial" => Cmd::Dial {
             target: target.ok_or("dial needs a host:port target")?,
             session,
+        },
+        "gossip" => Cmd::Gossip {
+            virt_port,
+            listen_peers: listen_peers.unwrap_or(0),
+            dials,
+            message: message.ok_or("gossip needs --message")?,
+            expect: expect.ok_or("gossip needs --expect")?,
         },
         other => return Err(format!("unknown subcommand {other}")),
     };
@@ -161,6 +213,73 @@ where
     tokio::time::timeout(STEP_TIMEOUT, dial_sequence(ch))
         .await
         .map_err(|_| "echo/dial phase timed out".to_string())??;
+    println!("OK");
+    Ok(())
+}
+
+/// Gossip over any backend: optionally listen and accept `listen_peers`
+/// inbound links, dial every `--dial` target (retrying inside the command,
+/// since the process must stay up to serve its listen side), then run
+/// naive gossip to convergence and print the converged set.
+pub(crate) async fn run_gossip<T>(
+    transport: T,
+    virt_port: Option<u16>,
+    listen_peers: u16,
+    dials: &[T::Addr],
+    message: Vec<u8>,
+    expect: usize,
+) -> Result<(), String>
+where
+    T: Transport,
+    T::Addr: std::fmt::Display,
+    <T::Connector as Connector>::Channel: 'static,
+    T::Listener: Listener<Channel = <T::Connector as Connector>::Channel>,
+{
+    let mut channels = Vec::new();
+    if let Some(port) = virt_port {
+        let params = ListenParams::new(port).with_nickname("fungigossip");
+        let (mut listener, addr) = tokio::time::timeout(STEP_TIMEOUT, transport.listen(params))
+            .await
+            .map_err(|_| "listen timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        println!("ONION={addr}");
+        println!("READY");
+        for _ in 0..listen_peers {
+            let ch = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
+                .await
+                .map_err(|_| "accept timed out".to_string())?
+                .map_err(|e| e.to_string())?;
+            channels.push(ch);
+        }
+    }
+    let connector = transport.connector();
+    for target in dials {
+        // In-command retry: the onion-descriptor publication race is
+        // otherwise absorbed by the VM script retrying the whole command,
+        // which a long-lived gossip node cannot afford.
+        let deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
+        let ch = loop {
+            match tokio::time::timeout(STEP_TIMEOUT, connector.connect(target)).await {
+                Ok(Ok(ch)) => break ch,
+                Ok(Err(e)) if tokio::time::Instant::now() < deadline => {
+                    eprintln!("dial {target} failed ({e}); retrying");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+                Ok(Err(e)) => return Err(format!("dial {target}: {e}")),
+                Err(_) => return Err("connect timed out".to_string()),
+            }
+        };
+        channels.push(ch);
+    }
+    let set = tokio::time::timeout(
+        STEP_TIMEOUT,
+        fungi_transport::harness::gossip_until(channels, message, expect),
+    )
+    .await
+    .map_err(|_| "gossip convergence timed out".to_string())??;
+    for msg in &set {
+        println!("MSG={}", String::from_utf8_lossy(msg));
+    }
     println!("OK");
     Ok(())
 }
@@ -222,6 +341,23 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
                 None => transport.connector(),
             };
             run_dial(connector, target).await
+        }
+        Cmd::Gossip {
+            virt_port,
+            listen_peers,
+            dials,
+            message,
+            expect,
+        } => {
+            run_gossip(
+                transport,
+                *virt_port,
+                *listen_peers,
+                dials,
+                message.clone(),
+                *expect,
+            )
+            .await
         }
     }
 }
@@ -346,6 +482,79 @@ mod tests {
         }
     }
 
+    /// `gossip` parses its mixed listen/dial role: optional listen side,
+    /// repeatable dials, required message and expected count.
+    #[test]
+    fn cli_parsing_accepts_gossip() {
+        let cli = parse_args(
+            [
+                "fungi-harness",
+                "gossip",
+                "--plugin",
+                "/nix/store/xxx/bin/fungi-arti-plugin",
+                "--virt-port",
+                "9736",
+                "--listen-peers",
+                "2",
+                "--message",
+                "from-b",
+                "--expect",
+                "3",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        match cli.cmd {
+            Cmd::Gossip {
+                virt_port,
+                listen_peers,
+                dials,
+                message,
+                expect,
+            } => {
+                assert_eq!(virt_port, Some(9736));
+                assert_eq!(listen_peers, 2);
+                assert!(dials.is_empty());
+                assert_eq!(message, b"from-b");
+                assert_eq!(expect, 3);
+            }
+            _ => panic!("expected a gossip command"),
+        }
+    }
+
+    /// A dial-only gossip node needs no listen side; `--dial` repeats.
+    #[test]
+    fn cli_parsing_accepts_dial_only_gossip() {
+        let onion = format!("{:a<56}.onion:9736", "host");
+        let cli = parse_args(
+            [
+                "fungi-harness",
+                "gossip",
+                "--plugin",
+                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "--dial",
+                &onion,
+                "--message",
+                "from-a",
+                "--expect",
+                "3",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        match cli.cmd {
+            Cmd::Gossip {
+                virt_port, dials, ..
+            } => {
+                assert_eq!(virt_port, None);
+                assert_eq!(dials.len(), 1);
+            }
+            _ => panic!("expected a gossip command"),
+        }
+    }
+
     /// The generic flags parse without a backend selector: `--state-dir` and
     /// `--private-net` are backend-agnostic and reach the plugin via env.
     #[test]
@@ -415,5 +624,39 @@ mod tests {
         // the close and run_listen returns Ok.
         run_dial(connector, &MemAddr).await.unwrap();
         listen.await.unwrap().unwrap();
+    }
+
+    /// A 3-node line over the mem transport: B listens for 2 links, A and C
+    /// dial in, all three converge on the same set through B.
+    #[tokio::test]
+    async fn run_gossip_converges_over_mem() {
+        use fungi_transport::mem::{MemAddr, MemConfig, MemTransport};
+        let transport = MemTransport::new(MemConfig {
+            capacity: Some(16),
+            ..MemConfig::default()
+        });
+        let conn_a = transport.connector();
+        let conn_c = transport.connector();
+        let b = tokio::spawn(run_gossip(
+            transport,
+            Some(1),
+            2,
+            &[],
+            b"from-b".to_vec(),
+            3,
+        ));
+        let dial_gossip = |conn: fungi_transport::mem::MemConnector, own: &'static [u8]| async move {
+            let ch = conn.connect(&MemAddr).await.unwrap();
+            fungi_transport::harness::gossip_until(vec![ch], own.to_vec(), 3)
+                .await
+                .unwrap()
+        };
+        let (sa, sc) = tokio::join!(
+            dial_gossip(conn_a, b"from-a"),
+            dial_gossip(conn_c, b"from-c")
+        );
+        b.await.unwrap().unwrap();
+        assert_eq!(sa, sc);
+        assert_eq!(sa.len(), 3);
     }
 }
