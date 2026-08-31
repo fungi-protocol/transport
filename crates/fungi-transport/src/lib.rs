@@ -41,6 +41,7 @@ pub mod addr;
 pub mod channel;
 pub mod error;
 pub mod framed;
+pub mod gossip_spike_a;
 pub mod harness;
 pub mod mem;
 pub mod sender;
