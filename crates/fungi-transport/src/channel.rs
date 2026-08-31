@@ -73,13 +73,13 @@ pub trait Channel: Send {
 /// (delivery semantics, cancel-safety, the error taxonomy — all identical);
 /// the only addition is the known sender. Because a P2P channel has ONE peer,
 /// the sender is exposed ONCE, not per message — per-message attribution is
-/// broadcast's shape, and a broadcast channel is a distinct type built later.
+/// broadcast's shape — see [`AttributableBroadcastChannel`].
 ///
 /// It is deliberately NOT a supertrait of, nor interchangeable with,
 /// [`Channel`]: an anonymous channel and an attributable one are different
 /// types so the compiler keeps them apart (you cannot pass one where the other
-/// is expected). Both are P2P; the broadcast counterparts arrive with the
-/// broadcast/gossip layer.
+/// is expected). Both are P2P; [`BroadcastChannel`] and
+/// [`AttributableBroadcastChannel`] are the broadcast counterparts.
 ///
 /// The separation is enforced by the type system, not convention. An
 /// attributable channel is not accepted where an anonymous [`Channel`] is
@@ -128,6 +128,53 @@ pub trait AttributableChannel: Send {
 /// A datagram channel to a GROUP of peers: opaque bytes, one message per
 /// call, and no sender identity on receive — the anonymous broadcast kind.
 ///
+/// # Examples
+///
+/// A three-member in-memory group ([`crate::mem::group`]): one send reaches
+/// both other members, and never echoes back to the sender:
+///
+/// ```
+/// use fungi_transport::BroadcastChannel;
+/// use fungi_transport::mem::{MemConfig, group};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut g = group(3, MemConfig { capacity: Some(4), ..MemConfig::default() });
+///
+/// g[0].send(b"hello group").await.unwrap();
+/// assert_eq!(g[1].recv().await.unwrap(), b"hello group");
+/// assert_eq!(g[2].recv().await.unwrap(), b"hello group");
+/// # }
+/// ```
+///
+/// The P2P/broadcast axis is enforced by the type system: a broadcast
+/// channel is not accepted where a P2P [`Channel`] is required, nor the
+/// reverse:
+///
+/// ```compile_fail
+/// use fungi_transport::{BroadcastChannel, Channel};
+///
+/// fn wants_p2p(_: impl Channel) {}
+///
+/// fn misuse(broadcast: impl BroadcastChannel) {
+///     // error[E0277]: the trait bound `impl BroadcastChannel: Channel`
+///     // is not satisfied — the two channel kinds are distinct types.
+///     wants_p2p(broadcast);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fungi_transport::{BroadcastChannel, Channel};
+///
+/// fn wants_broadcast(_: impl BroadcastChannel) {}
+///
+/// fn misuse(p2p: impl Channel) {
+///     // error[E0277]: the trait bound `impl Channel: BroadcastChannel`
+///     // is not satisfied.
+///     wants_broadcast(p2p);
+/// }
+/// ```
+///
 /// Same base contract as [`Channel`], group-wide:
 /// - `Ok(())` from `send` means the transport accepted the message for
 ///   best-effort delivery to every OTHER participant. It is NOT end-to-end
@@ -172,6 +219,62 @@ pub trait BroadcastChannel: Send {
 /// backend that can see it or a higher layer that authenticates messages
 /// themselves. Implementations that cannot attribute honestly implement
 /// [`BroadcastChannel`] instead.
+///
+/// The anonymous/attributable axis holds within broadcast too:
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableBroadcastChannel, BroadcastChannel};
+///
+/// fn wants_anonymous(_: impl BroadcastChannel) {}
+///
+/// fn misuse(attributable: impl AttributableBroadcastChannel) {
+///     // error[E0277]: the trait bound
+///     // `impl AttributableBroadcastChannel: BroadcastChannel` is not
+///     // satisfied — the two broadcast kinds are distinct types.
+///     wants_anonymous(attributable);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableBroadcastChannel, BroadcastChannel};
+///
+/// fn wants_attributable(_: impl AttributableBroadcastChannel) {}
+///
+/// fn misuse(anonymous: impl BroadcastChannel) {
+///     // error[E0277]: the trait bound
+///     // `impl BroadcastChannel: AttributableBroadcastChannel` is not
+///     // satisfied.
+///     wants_attributable(anonymous);
+/// }
+/// ```
+///
+/// The P2P/broadcast axis holds on the attributable side too:
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableBroadcastChannel, AttributableChannel};
+///
+/// fn wants_attributable_p2p(_: impl AttributableChannel) {}
+///
+/// fn misuse(broadcast: impl AttributableBroadcastChannel) {
+///     // error[E0277]: the trait bound
+///     // `impl AttributableBroadcastChannel: AttributableChannel` is not
+///     // satisfied — per-channel and per-message attribution are distinct types.
+///     wants_attributable_p2p(broadcast);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use fungi_transport::{AttributableBroadcastChannel, AttributableChannel};
+///
+/// fn wants_attributable_broadcast(_: impl AttributableBroadcastChannel) {}
+///
+/// fn misuse(p2p: impl AttributableChannel) {
+///     // error[E0277]: the trait bound
+///     // `impl AttributableChannel: AttributableBroadcastChannel` is not
+///     // satisfied.
+///     wants_attributable_broadcast(p2p);
+/// }
+/// ```
 pub trait AttributableBroadcastChannel: Send {
     /// The sender identity type this channel attributes messages to.
     type Sender: SenderId;
