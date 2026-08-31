@@ -409,7 +409,6 @@ impl crate::channel::BroadcastChannel for MemBroadcastChannel {
 mod tests {
     use super::*;
     use crate::channel::Channel;
-    use crate::error::RecvError;
     use crate::error::SendError;
     use crate::testkit;
     use std::time::Duration;
@@ -665,26 +664,6 @@ mod tests {
         );
     }
 
-    // Broadcast group: one send reaches every OTHER member; the sender's own
-    // queue stays empty (no echo).
-    #[tokio::test]
-    async fn group_send_reaches_all_others_and_never_echoes() {
-        use crate::channel::BroadcastChannel;
-        let mut g = group(
-            3,
-            MemConfig {
-                capacity: Some(4),
-                ..MemConfig::default()
-            },
-        );
-        g[0].send(b"hello group").await.unwrap();
-        assert_eq!(g[1].recv().await.unwrap(), b"hello group");
-        assert_eq!(g[2].recv().await.unwrap(), b"hello group");
-        let echo =
-            tokio::time::timeout(std::time::Duration::from_millis(50), g[0].recv()).await;
-        assert!(echo.is_err(), "a sender must not receive its own broadcast");
-    }
-
     // A departed member is skipped silently; only when EVERY other member is
     // gone does a Confirmed send report the group dead.
     #[tokio::test]
@@ -709,14 +688,42 @@ mod tests {
         ));
     }
 
-    // The last member's recv reports the group dead once all senders are gone.
+    // CONFORMANCE (broadcast trait contract) — delegated to the testkit; the
+    // mock group is the broadcast testkit's first client.
     #[tokio::test]
-    async fn group_recv_is_closed_after_all_others_drop() {
-        use crate::channel::BroadcastChannel;
-        let mut g = group(3, MemConfig::default());
-        let last = g.pop().unwrap();
-        drop(g);
-        let mut last = last;
-        assert!(matches!(last.recv().await, Err(RecvError::Closed)));
+    async fn broadcast_reaches_all_others() {
+        let g = group(
+            3,
+            MemConfig {
+                capacity: Some(4),
+                ..MemConfig::default()
+            },
+        );
+        testkit::broadcast_reaches_all_others(g).await;
+    }
+
+    #[tokio::test]
+    async fn broadcast_recv_is_cancel_safe() {
+        let g = group(2, MemConfig::default());
+        testkit::broadcast_recv_is_cancel_safe(g).await;
+    }
+
+    #[tokio::test]
+    async fn broadcast_too_large_is_recoverable() {
+        let g = group(
+            2,
+            MemConfig {
+                capacity: Some(2),
+                max_msg_len: Some(16),
+                ..MemConfig::default()
+            },
+        );
+        testkit::broadcast_too_large_is_recoverable(g, 16).await;
+    }
+
+    #[tokio::test]
+    async fn broadcast_closed_after_group_drop() {
+        let g = group(3, MemConfig::default());
+        testkit::closed_after_group_drop(g).await;
     }
 }

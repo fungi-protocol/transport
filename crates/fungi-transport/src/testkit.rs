@@ -1,9 +1,9 @@
-//! Conformance suite for [`Channel`] implementations. Any transport
-//! (in-memory, SOCKS5h, arti, OHTTP mailbox) must pass these; each test
-//! takes a freshly connected pair. Ordering is deliberately NOT asserted —
-//! the trait promises none.
+//! Conformance suite for [`Channel`] and [`BroadcastChannel`] implementations.
+//! Any transport (in-memory, SOCKS5h, arti, OHTTP mailbox) must pass these;
+//! each test takes a freshly connected pair. Ordering is deliberately NOT
+//! asserted — the trait promises none.
 
-use crate::channel::{Channel, Connector, Listener};
+use crate::channel::{BroadcastChannel, Channel, Connector, Listener};
 use crate::error::{RecvError, SendError};
 
 /// Everything sent arrives intact, both directions. No order assertion.
@@ -90,4 +90,56 @@ where
     let (mut client2, mut server2) = (client2.expect("reconnect"), server2.expect("re-accept"));
     client2.send(b"again").await.unwrap();
     assert_eq!(server2.recv().await.unwrap(), b"again");
+}
+
+/// One send reaches every other member intact, and the sender does NOT
+/// receive its own message (no echo).
+pub async fn broadcast_reaches_all_others<B: BroadcastChannel>(mut group: Vec<B>) {
+    assert!(group.len() >= 3, "needs a group of at least 3");
+    group[0].send(b"to everyone else").await.unwrap();
+    for member in group.iter_mut().skip(1) {
+        assert_eq!(member.recv().await.unwrap(), b"to everyone else");
+    }
+    let echo =
+        tokio::time::timeout(std::time::Duration::from_millis(50), group[0].recv()).await;
+    assert!(echo.is_err(), "a sender must not receive its own broadcast");
+}
+
+/// An abandoned broadcast recv future must not lose messages.
+pub async fn broadcast_recv_is_cancel_safe<B: BroadcastChannel>(mut group: Vec<B>) {
+    assert!(group.len() >= 2, "needs a group of at least 2");
+    for _ in 0..10 {
+        let poll =
+            tokio::time::timeout(std::time::Duration::from_millis(5), group[1].recv()).await;
+        assert!(poll.is_err());
+    }
+    group[0].send(b"m1").await.unwrap();
+    assert_eq!(group[1].recv().await.unwrap(), b"m1");
+}
+
+/// `TooLarge` is RECOVERABLE on a broadcast channel too: the oversized
+/// message reaches no one and the channel stays usable.
+pub async fn broadcast_too_large_is_recoverable<B: BroadcastChannel>(
+    mut group: Vec<B>,
+    max: usize,
+) {
+    assert!(group.len() >= 2, "needs a group of at least 2");
+    let oversized = vec![0u8; max + 1];
+    assert!(matches!(
+        group[0].send(&oversized).await,
+        Err(SendError::TooLarge { max: m }) if m == max
+    ));
+    group[0]
+        .send(b"still alive")
+        .await
+        .expect("channel survives TooLarge");
+    assert_eq!(group[1].recv().await.unwrap(), b"still alive");
+}
+
+/// Once every other member is gone, the last member's recv reports the
+/// channel dead.
+pub async fn closed_after_group_drop<B: BroadcastChannel>(mut group: Vec<B>) {
+    let mut last = group.pop().expect("non-empty group");
+    drop(group);
+    assert!(last.recv().await.is_err(), "an abandoned member must see a dead channel");
 }
