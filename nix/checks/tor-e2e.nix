@@ -21,7 +21,8 @@
         # the sum of the per-step budgets, so a slow-but-passing run fails at a
         # clean per-step timeout rather than being cut off mid-step as an opaque
         # global timeout.
-        globalTimeout = 5400;
+        # The gossip step adds up to ~1600s of per-step budget on top of the dial steps.
+        globalTimeout = 7200;
         nodes = let
           fingerprints = import ../tor-test-net/fingerprints.nix;
           torrc = import ../tor-test-net/torrc.nix { inherit fingerprints; };
@@ -62,7 +63,7 @@
             networking.firewall.enable = false;
             # Relays build the onion rendezvous circuits; 512 MB with no swap
             # starved tor and it dropped most circuits. 1 GB keeps them reliable
-            # (3x512 DA + 6x1024 relay + 2x1024 peer = ~9.7 GB, fits the runner).
+            # (3x512 DA + 6x1024 relay + 3x1024 peer = ~10.7 GB, fits the runner).
             virtualisation.memorySize = 1024;
             services.tor = {
               enable = true;
@@ -93,6 +94,12 @@
           peer_arti = { ... }: {
             networking.interfaces.eth1.ipv4.addresses = [{ address = "192.168.1.32"; prefixLength = 24; }];
             networking.firewall.enable = false;
+          };
+          peer_socks2 = { ... }: {
+            networking.interfaces.eth1.ipv4.addresses = [{ address = "192.168.1.33"; prefixLength = 24; }];
+            networking.firewall.enable = false;
+            services.tor = { enable = true; client.enable = true; settings = torrc.clientSettings { inherit daIps; }; };
+            environment.systemPackages = [ pkgs.netcat ];
           };
         };
         testScript = ''
@@ -210,6 +217,29 @@
           # the arti echo listener need not exit cleanly. Record its log, stop it.
           peer_arti.execute("cat /tmp/listen.err >&2 || true")
           peer_arti.execute("pkill -f 'harness listen' || true")
+
+          # Gossip convergence on a LINE topology: A(socks5h) — B(arti) — C(socks5h).
+          # Only B publishes an onion; A and C dial it. A's message can reach C
+          # only through B's forwarding — plain multicast cannot serve this graph.
+          peer_socks2.wait_for_unit("tor.service")
+          peer_socks2.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
+          peer_arti.succeed(
+              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-gossip --virt-port 9736 --listen-peers 2 --message from-b --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+          )
+          peer_arti.wait_until_succeeds("grep -q READY /tmp/gossip.log", timeout=600)
+          gossip_onion = peer_arti.succeed("grep ONION= /tmp/gossip.log").strip().split("=", 1)[1]
+          # Same onion-settling pause as the dial steps above.
+          peer_arti.sleep(90)
+          for node, own in [(peer_socks, "from-a"), (peer_socks2, "from-c")]:
+              node.succeed(
+                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+              )
+          for node in [peer_socks, peer_socks2, peer_arti]:
+              node.wait_until_succeeds("grep -qx OK /tmp/gossip.log", timeout=900)
+          for node in [peer_socks, peer_socks2, peer_arti]:
+              got = sorted(node.succeed("grep '^MSG=' /tmp/gossip.log").split())
+              assert got == ["MSG=from-a", "MSG=from-b", "MSG=from-c"], f"set mismatch on {node.name}: {got}"
+              node.execute("cat /tmp/gossip.err >&2 || true")
         '';
       };
       }
