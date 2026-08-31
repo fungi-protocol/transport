@@ -125,6 +125,37 @@ pub trait AttributableChannel: Send {
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
 }
 
+/// A datagram channel to a GROUP of peers: opaque bytes, one message per
+/// call, and no sender identity on receive — the anonymous broadcast kind.
+///
+/// Same base contract as [`Channel`], group-wide:
+/// - `Ok(())` from `send` means the transport accepted the message for
+///   best-effort delivery to every OTHER participant. It is NOT end-to-end
+///   confirmation, and the sender does not receive its own message back.
+/// - `recv` resolves with the next message from any participant; the
+///   transport buffers internally. Dropping the `recv` future before it
+///   resolves must not lose any message (cancel safety).
+/// - `send` is NOT required to be cancel-safe: treat the whole channel as
+///   dead after cancelling a send.
+/// - [`SendError::TooLarge`] is the one RECOVERABLE send error. Any `recv`
+///   error, and any other `send` error, means the channel is DEAD; recovery
+///   is a new channel from the construction layer, never this one.
+/// - Buffering is internal and the overflow policy is implementation-
+///   defined; a receiver that falls too far behind finds the channel dead.
+/// - No ordering guarantees, no deduplication.
+///
+/// Propagation is the implementation's job, below this trait: however the
+/// implementation reaches the group (gossip over P2P channels, a
+/// server-side broadcast API), a consumer only calls `send` and `recv` and
+/// cannot tell the difference. Group membership does not appear here —
+/// who "every participant" is belongs to the construction layer.
+pub trait BroadcastChannel: Send {
+    /// Send one opaque message toward every other participant.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
+    /// Wait for and return the next message from any participant.
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
+}
+
 /// Establishes channels to peers, for connection-oriented transports.
 ///
 /// Message-based transports (e.g. an OHTTP mailbox) implement only
@@ -352,6 +383,32 @@ mod tests {
         assert_send(ch.recv());
         assert_eq!(ch.recv().await.unwrap(), b"hi");
         assert_eq!(ch.sender().as_bytes(), b"alice");
+    }
+
+    /// Group-loopback double: every sent message lands in one shared queue
+    /// that recv drains. Proves `BroadcastChannel` is implementable with
+    /// plain async blocks and Send futures.
+    struct BroadcastLoopback(std::collections::VecDeque<Vec<u8>>);
+
+    impl BroadcastChannel for BroadcastLoopback {
+        fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+            self.0.push_back(msg.to_vec());
+            async { Ok(()) }
+        }
+        fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
+            let next = self.0.pop_front();
+            async move { next.ok_or(RecvError::Closed) }
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_trait_is_implementable_and_futures_are_send() {
+        let mut ch = BroadcastLoopback(Default::default());
+        assert_send(ch.send(b"to the group"));
+        ch.send(b"to the group").await.unwrap();
+        assert_send(ch.recv());
+        assert_eq!(ch.recv().await.unwrap(), b"to the group");
+        assert!(matches!(ch.recv().await, Err(RecvError::Closed)));
     }
 
     #[tokio::test]
