@@ -41,7 +41,13 @@ pub mod addr;
 pub mod channel;
 pub mod error;
 pub mod framed;
+// Branch-only probes: their only consumer is their own test suite, and they
+// use tokio::spawn/select!, which need the "rt"/"macros" features this crate
+// only pulls in as a dev-dependency — so they compile under `cargo test`,
+// gated here, without pulling those features into the crate's real build.
+#[cfg(test)]
 pub mod gossip_spike_a;
+#[cfg(test)]
 pub mod gossip_spike_c;
 pub mod harness;
 pub mod mem;
