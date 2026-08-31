@@ -3,7 +3,9 @@
 //! each test takes a freshly connected pair. Ordering is deliberately NOT
 //! asserted — the trait promises none.
 
-use crate::channel::{BroadcastChannel, Channel, Connector, Listener};
+use crate::channel::{
+    AttributableBroadcastChannel, BroadcastChannel, Channel, Connector, Listener,
+};
 use crate::error::{RecvError, SendError};
 
 /// Everything sent arrives intact, both directions. No order assertion.
@@ -100,8 +102,7 @@ pub async fn broadcast_reaches_all_others<B: BroadcastChannel>(mut group: Vec<B>
     for member in group.iter_mut().skip(1) {
         assert_eq!(member.recv().await.unwrap(), b"to everyone else");
     }
-    let echo =
-        tokio::time::timeout(std::time::Duration::from_millis(50), group[0].recv()).await;
+    let echo = tokio::time::timeout(std::time::Duration::from_millis(50), group[0].recv()).await;
     assert!(echo.is_err(), "a sender must not receive its own broadcast");
 }
 
@@ -109,8 +110,7 @@ pub async fn broadcast_reaches_all_others<B: BroadcastChannel>(mut group: Vec<B>
 pub async fn broadcast_recv_is_cancel_safe<B: BroadcastChannel>(mut group: Vec<B>) {
     assert!(group.len() >= 2, "needs a group of at least 2");
     for _ in 0..10 {
-        let poll =
-            tokio::time::timeout(std::time::Duration::from_millis(5), group[1].recv()).await;
+        let poll = tokio::time::timeout(std::time::Duration::from_millis(5), group[1].recv()).await;
         assert!(poll.is_err());
     }
     group[0].send(b"m1").await.unwrap();
@@ -141,5 +141,34 @@ pub async fn broadcast_too_large_is_recoverable<B: BroadcastChannel>(
 pub async fn closed_after_group_drop<B: BroadcastChannel>(mut group: Vec<B>) {
     let mut last = group.pop().expect("non-empty group");
     drop(group);
-    assert!(last.recv().await.is_err(), "an abandoned member must see a dead channel");
+    assert!(
+        last.recv().await.is_err(),
+        "an abandoned member must see a dead channel"
+    );
+}
+
+/// Every message arrives attributed to the member that sent it: two members
+/// send, a third receives both, the senders are distinct, and re-sends from
+/// the same member carry an equal sender.
+pub async fn attribution_matches_sender<B: AttributableBroadcastChannel>(mut group: Vec<B>) {
+    assert!(group.len() >= 3, "needs a group of at least 3");
+    group[0].send(b"first").await.unwrap();
+    group[1].send(b"second").await.unwrap();
+    group[0].send(b"first again").await.unwrap();
+    let mut by_msg = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let (sender, msg) = group[2].recv().await.unwrap();
+        by_msg.insert(msg, sender);
+    }
+    let a = by_msg.get(b"first".as_slice()).expect("got first");
+    let b = by_msg.get(b"second".as_slice()).expect("got second");
+    let a2 = by_msg
+        .get(b"first again".as_slice())
+        .expect("got first again");
+    // Plain comparisons: `SenderId` guarantees Eq but not Debug.
+    assert!(a != b, "distinct members must compare distinct");
+    assert!(
+        a == a2,
+        "the same member must compare equal across messages"
+    );
 }

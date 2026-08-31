@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::channel::{Channel, Connector, Listener};
 use crate::error::{ConnectError, RecvError, SendError};
+use crate::sender::SenderId;
 use crate::session::SessionId;
 
 /// What `send` promises in this mock.
@@ -405,6 +406,91 @@ impl crate::channel::BroadcastChannel for MemBroadcastChannel {
     }
 }
 
+/// Sender identity inside an in-memory group: the member's index. Only
+/// meaningful within the group that minted it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MemSenderId([u8; 4]);
+
+impl SenderId for MemSenderId {
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A [`MemBroadcastChannel`] that also names which member each message came
+/// from. Attribution is by construction: the shared bus tags every message
+/// with the sending handle's index, so it is trustworthy only within this
+/// process — which is the honest reach of this mock.
+///
+/// This group is always [`Delivery::Confirmed`] with no `send_timeout` and no
+/// fault injection; of [`MemConfig`]'s knobs only `capacity`, `max_msg_len`
+/// and `latency` apply.
+#[derive(Debug)]
+pub struct MemAttributableBroadcastChannel {
+    me: MemSenderId,
+    txs: Vec<mpsc::Sender<(MemSenderId, Vec<u8>)>>,
+    rx: mpsc::Receiver<(MemSenderId, Vec<u8>)>,
+    cfg: MemConfig,
+}
+
+/// Create an `n`-member ATTRIBUTED broadcast group; member `i`'s sender id
+/// is its index.
+pub fn attributed_group(n: usize, cfg: MemConfig) -> Vec<MemAttributableBroadcastChannel> {
+    let cap = cfg.capacity.unwrap_or(1).max(1);
+    let (txs, rxs): (Vec<_>, Vec<_>) = (0..n).map(|_| mpsc::channel(cap)).unzip();
+    rxs.into_iter()
+        .enumerate()
+        .map(|(i, rx)| MemAttributableBroadcastChannel {
+            me: MemSenderId((i as u32).to_be_bytes()),
+            txs: txs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, tx)| tx.clone())
+                .collect(),
+            rx,
+            cfg: cfg.clone(),
+        })
+        .collect()
+}
+
+impl crate::channel::AttributableBroadcastChannel for MemAttributableBroadcastChannel {
+    type Sender = MemSenderId;
+
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        let msg = match self.cfg.max_msg_len {
+            Some(max) if msg.len() > max => Err(max),
+            _ => Ok(msg.to_vec()),
+        };
+        async move {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(max) => return Err(SendError::TooLarge { max }),
+            };
+            if let Some(latency) = self.cfg.latency {
+                tokio::time::sleep(latency).await;
+            }
+            if self.txs.is_empty() {
+                return Ok(());
+            }
+            let mut alive = 0usize;
+            for tx in &self.txs {
+                if tx.send((self.me.clone(), msg.clone())).await.is_ok() {
+                    alive += 1;
+                }
+            }
+            if alive == 0 {
+                return Err(SendError::Closed);
+            }
+            Ok(())
+        }
+    }
+
+    async fn recv(&mut self) -> Result<(MemSenderId, Vec<u8>), RecvError> {
+        self.rx.recv().await.ok_or(RecvError::Closed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,5 +811,17 @@ mod tests {
     async fn broadcast_closed_after_group_drop() {
         let g = group(3, MemConfig::default());
         testkit::closed_after_group_drop(g).await;
+    }
+
+    #[tokio::test]
+    async fn attribution_matches_sender() {
+        let g = attributed_group(
+            3,
+            MemConfig {
+                capacity: Some(4),
+                ..MemConfig::default()
+            },
+        );
+        testkit::attribution_matches_sender(g).await;
     }
 }
