@@ -86,6 +86,13 @@ pub async fn gossip_until<C: Channel + 'static>(
     // message that just completed the set. Dropping the command senders
     // instead lets each link drain its already-queued forwards (including
     // that last one) before its task returns on its own.
+    //
+    // Drop the hub's receiver too, before joining: a link task blocked in
+    // `to_hub.send` (hub-inbound traffic still arriving while shutdown is in
+    // progress) would otherwise never reach the `Forward(None)` that ends
+    // its loop — a dropped receiver wakes any blocked sender with an error
+    // instead, so `to_hub.send(..).is_err()` returns the task promptly.
+    drop(from_links);
     drop(link_cmds);
     for link in links {
         let _ = link.await;
