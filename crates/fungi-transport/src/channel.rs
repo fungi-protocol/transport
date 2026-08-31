@@ -156,6 +156,32 @@ pub trait BroadcastChannel: Send {
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
 }
 
+/// A broadcast channel whose messages are ATTRIBUTED: every received
+/// message names its sender — per message, because a group has many
+/// senders (a P2P [`AttributableChannel`] has one peer and names it once).
+///
+/// Same group-wide contract as [`BroadcastChannel`] (best-effort send to
+/// every other participant, no echo, cancel-safe `recv`, the error
+/// taxonomy, implementation-defined overflow, membership elsewhere); the
+/// only addition is the sender on receive.
+///
+/// What the sender means is the implementation's promise, and every
+/// implementation documents its own mechanism and how far it reaches: a
+/// transport that relays through peers can only vouch for its immediate
+/// neighbor, never the originator, so attributing the originator takes a
+/// backend that can see it or a higher layer that authenticates messages
+/// themselves. Implementations that cannot attribute honestly implement
+/// [`BroadcastChannel`] instead.
+pub trait AttributableBroadcastChannel: Send {
+    /// The sender identity type this channel attributes messages to.
+    type Sender: SenderId;
+
+    /// Send one opaque message toward every other participant.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
+    /// Wait for and return the next message and the sender it is from.
+    fn recv(&mut self) -> impl Future<Output = Result<(Self::Sender, Vec<u8>), RecvError>> + Send;
+}
+
 /// Establishes channels to peers, for connection-oriented transports.
 ///
 /// Message-based transports (e.g. an OHTTP mailbox) implement only
@@ -408,6 +434,37 @@ mod tests {
         ch.send(b"to the group").await.unwrap();
         assert_send(ch.recv());
         assert_eq!(ch.recv().await.unwrap(), b"to the group");
+        assert!(matches!(ch.recv().await, Err(RecvError::Closed)));
+    }
+
+    /// Group loopback with per-message senders: proves the attributable
+    /// broadcast trait is implementable and that attribution travels with
+    /// each message, not once per channel.
+    struct AttributedBroadcastLoopback(std::collections::VecDeque<(TestSender, Vec<u8>)>);
+
+    impl AttributableBroadcastChannel for AttributedBroadcastLoopback {
+        type Sender = TestSender;
+        fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+            self.0.push_back((TestSender(b"me".to_vec()), msg.to_vec()));
+            async { Ok(()) }
+        }
+        fn recv(
+            &mut self,
+        ) -> impl Future<Output = Result<(TestSender, Vec<u8>), RecvError>> + Send {
+            let next = self.0.pop_front();
+            async move { next.ok_or(RecvError::Closed) }
+        }
+    }
+
+    #[tokio::test]
+    async fn attributable_broadcast_attributes_per_message() {
+        let mut ch = AttributedBroadcastLoopback(Default::default());
+        ch.0.push_back((TestSender(b"alice".to_vec()), b"hi".to_vec()));
+        ch.0.push_back((TestSender(b"bob".to_vec()), b"yo".to_vec()));
+        let (s1, m1) = ch.recv().await.unwrap();
+        let (s2, m2) = ch.recv().await.unwrap();
+        assert_eq!((s1.as_bytes(), m1.as_slice()), (&b"alice"[..], &b"hi"[..]));
+        assert_eq!((s2.as_bytes(), m2.as_slice()), (&b"bob"[..], &b"yo"[..]));
         assert!(matches!(ch.recv().await, Err(RecvError::Closed)));
     }
 
