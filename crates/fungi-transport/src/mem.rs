@@ -1,6 +1,7 @@
 //! In-memory pipe implementation of the [`crate::channel`] traits. Two
 //! crossed bounded `tokio::sync::mpsc` queues; capacity 1 by default so a
-//! slow transport is simulated for free.
+//! slow transport is simulated for free; [`group`] wires `n` members into a
+//! broadcast bus the same way.
 //!
 //! The opening contract is simulated, not provided: both ends live in one
 //! process, so there is no real anonymity or authentication here — this
@@ -286,10 +287,129 @@ impl Listener for MemListener {
     }
 }
 
+/// One member's handle onto an in-memory broadcast group: whatever this
+/// member sends lands in every other member's queue; `recv` drains this
+/// member's own queue. The same [`MemConfig`] knobs and fault injection as
+/// [`MemChannel`] apply, message by message across the whole fan-out (an
+/// injected drop or failure covers the entire send, not one recipient).
+///
+/// Mock-specific departure semantics: a send to a member that already
+/// dropped its handle is skipped silently (their loss is their departure);
+/// only when EVERY other member is gone does a Confirmed-mode send yield
+/// [`SendError::Closed`]. A group of one has no recipients and its sends
+/// vacuously succeed.
+#[derive(Debug)]
+pub struct MemBroadcastChannel {
+    txs: Vec<mpsc::Sender<Vec<u8>>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    cfg: MemConfig,
+    drop_next: AtomicUsize,
+    fail_next: AtomicUsize,
+}
+
+impl MemBroadcastChannel {
+    /// Silently drop the next `n` sends (best-effort loss injection); a
+    /// dropped send reaches no member.
+    pub fn drop_next(&self, n: usize) {
+        self.drop_next.store(n, Ordering::Relaxed);
+    }
+    /// Fail the next `n` sends with [`SendError::Transport`]. Same
+    /// mock-specific tolerance as [`MemChannel::fail_next`].
+    pub fn fail_next(&self, n: usize) {
+        self.fail_next.store(n, Ordering::Relaxed);
+    }
+}
+
+/// Create an `n`-member broadcast group sharing one in-memory bus.
+pub fn group(n: usize, cfg: MemConfig) -> Vec<MemBroadcastChannel> {
+    let cap = cfg.capacity.unwrap_or(1).max(1);
+    let (txs, rxs): (Vec<_>, Vec<_>) = (0..n).map(|_| mpsc::channel(cap)).unzip();
+    rxs.into_iter()
+        .enumerate()
+        .map(|(i, rx)| MemBroadcastChannel {
+            txs: txs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, tx)| tx.clone())
+                .collect(),
+            rx,
+            cfg: cfg.clone(),
+            drop_next: AtomicUsize::new(0),
+            fail_next: AtomicUsize::new(0),
+        })
+        .collect()
+}
+
+impl crate::channel::BroadcastChannel for MemBroadcastChannel {
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        let msg = match self.cfg.max_msg_len {
+            Some(max) if msg.len() > max => Err(max),
+            _ => Ok(msg.to_vec()),
+        };
+        async move {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(max) => return Err(SendError::TooLarge { max }),
+            };
+            if take_one(&self.fail_next) {
+                return Err(SendError::Transport("injected failure".into()));
+            }
+            if let Some(latency) = self.cfg.latency {
+                tokio::time::sleep(latency).await;
+            }
+            if take_one(&self.drop_next) {
+                return Ok(()); // injected silent loss, group-wide
+            }
+            if self.txs.is_empty() {
+                return Ok(()); // a group of one: vacuous delivery
+            }
+            match self.cfg.delivery {
+                Delivery::Confirmed => {
+                    let mut alive = 0usize;
+                    for tx in &self.txs {
+                        let sent = match self.cfg.send_timeout {
+                            Some(deadline) => {
+                                match tokio::time::timeout(deadline, tx.send(msg.clone())).await {
+                                    Ok(sent) => sent.map_err(|_| ()),
+                                    Err(_) => {
+                                        return Err(SendError::Transport("send timed out".into()));
+                                    }
+                                }
+                            }
+                            None => tx.send(msg.clone()).await.map_err(|_| ()),
+                        };
+                        if sent.is_ok() {
+                            alive += 1;
+                        }
+                    }
+                    if alive == 0 {
+                        return Err(SendError::Closed);
+                    }
+                    Ok(())
+                }
+                Delivery::BestEffort => {
+                    for tx in &self.txs {
+                        let _ = tx.try_send(msg.clone()); // full or closed: silent loss
+                    }
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
+        // Closes only when every other member dropped its handle (each holds
+        // a clone of this member's tx).
+        self.rx.recv().await.ok_or(RecvError::Closed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::channel::Channel;
+    use crate::error::RecvError;
     use crate::error::SendError;
     use crate::testkit;
     use std::time::Duration;
@@ -543,5 +663,60 @@ mod tests {
             transport.connector_for(&s1).session(),
             transport.connector_for(&s1).session()
         );
+    }
+
+    // Broadcast group: one send reaches every OTHER member; the sender's own
+    // queue stays empty (no echo).
+    #[tokio::test]
+    async fn group_send_reaches_all_others_and_never_echoes() {
+        use crate::channel::BroadcastChannel;
+        let mut g = group(
+            3,
+            MemConfig {
+                capacity: Some(4),
+                ..MemConfig::default()
+            },
+        );
+        g[0].send(b"hello group").await.unwrap();
+        assert_eq!(g[1].recv().await.unwrap(), b"hello group");
+        assert_eq!(g[2].recv().await.unwrap(), b"hello group");
+        let echo =
+            tokio::time::timeout(std::time::Duration::from_millis(50), g[0].recv()).await;
+        assert!(echo.is_err(), "a sender must not receive its own broadcast");
+    }
+
+    // A departed member is skipped silently; only when EVERY other member is
+    // gone does a Confirmed send report the group dead.
+    #[tokio::test]
+    async fn group_send_skips_departed_members_until_all_are_gone() {
+        use crate::channel::BroadcastChannel;
+        let mut g = group(
+            3,
+            MemConfig {
+                capacity: Some(4),
+                ..MemConfig::default()
+            },
+        );
+        let c = g.remove(2);
+        drop(c);
+        g[0].send(b"still delivered").await.unwrap();
+        assert_eq!(g[1].recv().await.unwrap(), b"still delivered");
+        let b = g.remove(1);
+        drop(b);
+        assert!(matches!(
+            g[0].send(b"nobody left").await,
+            Err(SendError::Closed)
+        ));
+    }
+
+    // The last member's recv reports the group dead once all senders are gone.
+    #[tokio::test]
+    async fn group_recv_is_closed_after_all_others_drop() {
+        use crate::channel::BroadcastChannel;
+        let mut g = group(3, MemConfig::default());
+        let last = g.pop().unwrap();
+        drop(g);
+        let mut last = last;
+        assert!(matches!(last.recv().await, Err(RecvError::Closed)));
     }
 }
