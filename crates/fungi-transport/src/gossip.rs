@@ -650,4 +650,106 @@ mod tests {
         g.send(b"into the void").await.unwrap();
         assert!(matches!(g.recv().await, Err(RecvError::Closed)));
     }
+
+    // A simultaneous burst inside the configured bounds converges fully:
+    // liveness does not weaken the healthy-path message-set guarantee.
+    #[tokio::test]
+    async fn simultaneous_bursts_converge_within_the_bounds() {
+        let roomy = MemConfig {
+            capacity: Some(512),
+            ..MemConfig::default()
+        };
+        let config = GossipConfig {
+            queue_capacity: 512,
+        };
+        let (ab, ba) = duplex(roomy);
+        let mut a = GossipBroadcast::with_config(vec![ab], config);
+        let mut b = GossipBroadcast::with_config(vec![ba], config);
+
+        async fn send_burst(node: &mut GossipBroadcast, tag: u8) {
+            for i in 0..200u32 {
+                let mut msg = vec![tag];
+                msg.extend_from_slice(&i.to_be_bytes());
+                node.send(&msg).await.unwrap();
+            }
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            futures_util::future::join(send_burst(&mut a, b'a'), send_burst(&mut b, b'b')),
+        )
+        .await
+        .expect("both bursts must finish sending without wedging");
+
+        async fn drain(node: &mut GossipBroadcast) -> usize {
+            for count in 1..=200 {
+                tokio::time::timeout(Duration::from_secs(5), node.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("burst stopped after {} messages", count - 1))
+                    .unwrap();
+            }
+            200
+        }
+        let (ra, rb) = futures_util::future::join(drain(&mut a), drain(&mut b)).await;
+        assert_eq!((ra, rb), (200, 200));
+    }
+
+    // Saturation cannot masquerade as successful convergence. The bounded
+    // hub terminates the group instead of silently discarding a first-seen
+    // message and keeping the channel apparently healthy.
+    #[tokio::test]
+    async fn saturated_burst_fails_explicitly_instead_of_diverging() {
+        let (ab, ba) = duplex(MemConfig {
+            capacity: Some(1),
+            ..MemConfig::default()
+        });
+        let config = GossipConfig { queue_capacity: 1 };
+        let mut a = GossipBroadcast::with_config(vec![ab], config);
+        let _parked = ba;
+
+        let mut observed_failure = false;
+        for i in 0..200u32 {
+            if a.send(&i.to_be_bytes()).await.is_err() {
+                observed_failure = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        if !observed_failure {
+            observed_failure = tokio::time::timeout(Duration::from_secs(1), a.recv())
+                .await
+                .expect("a saturated group must terminate")
+                .is_err();
+        }
+        assert!(observed_failure);
+        // No shutdown here: the parked peer never reads, so the drain this
+        // node owes it cannot finish — that wait is the caller's to bound,
+        // and dropping abandons it, which is what a failed group wants.
+    }
+
+    // A slow local consumer is another loss of convergence, not permission
+    // to discard messages while keeping the channel apparently healthy.
+    #[tokio::test]
+    async fn full_consumer_queue_ends_the_group_explicitly() {
+        let (ab, mut ba) = duplex(MemConfig {
+            capacity: Some(16),
+            ..MemConfig::default()
+        });
+        let config = GossipConfig { queue_capacity: 1 };
+        let mut a = GossipBroadcast::with_config(vec![ab], config);
+
+        for message in [b"one".as_slice(), b"two", b"three"] {
+            let _ = ba.send(message).await;
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(a.recv().await.unwrap(), b"one");
+        assert!(a.recv().await.is_err());
+        assert!(matches!(
+            a.shutdown().await,
+            Err(GossipError::QueueFull {
+                output: QueueKind::Consumer
+            })
+        ));
+    }
 }
