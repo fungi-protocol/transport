@@ -234,12 +234,18 @@
               node.succeed(
                   f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
-          for node in [peer_socks, peer_socks2, peer_arti]:
-              node.wait_until_succeeds("grep -qx OK /tmp/gossip.log", timeout=900)
-          for node in [peer_socks, peer_socks2, peer_arti]:
-              got = sorted(node.succeed("grep '^MSG=' /tmp/gossip.log").split())
-              assert got == ["MSG=from-a", "MSG=from-b", "MSG=from-c"], f"set mismatch on {node.name}: {got}"
-              node.execute("cat /tmp/gossip.err >&2 || true")
+          try:
+              for node in [peer_socks, peer_socks2, peer_arti]:
+                  node.wait_until_succeeds("grep -qx OK /tmp/gossip.log", timeout=900)
+              for node in [peer_socks, peer_socks2, peer_arti]:
+                  got = sorted(node.succeed("grep '^MSG=' /tmp/gossip.log").split())
+                  assert got == ["MSG=from-a", "MSG=from-b", "MSG=from-c"], f"set mismatch on {node.name}: {got}"
+          finally:
+              # On failure the harness's stderr (dial retries, transport
+              # errors) is the only record of what each gossip node saw;
+              # dump it unconditionally, not just on the success path.
+              for node in [peer_socks, peer_socks2, peer_arti]:
+                  node.execute("cat /tmp/gossip.err >&2 || true")
         '';
       };
       }
