@@ -41,6 +41,7 @@ pub mod addr;
 pub mod channel;
 pub mod error;
 pub mod framed;
+pub mod gossip;
 pub mod harness;
 pub mod mem;
 pub mod sender;
@@ -53,6 +54,7 @@ pub use channel::{
     ListenParams, Listener, RecvHalf, SendHalf, SplitChannel, Transport, into_stream,
 };
 pub use error::{BoxError, ConnectError, RecvError, SendError};
+pub use gossip::{GossipBroadcast, GossipConfig, GossipError, QueueKind};
 pub use harness::{dial_sequence, echo_one_peer};
 pub use sender::SenderId;
 pub use session::{ParseSessionIdError, SessionId};
