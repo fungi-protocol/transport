@@ -1152,34 +1152,86 @@ impl channel::Server for Loopback {
     }
 }
 
-/// A capnp [`channel::Server`] that forwards each call to an async [`Channel`]
-/// backend.
+/// A capnp [`channel::Server`] forwarding to an async [`Channel`] backend
+/// through a per-channel pump task that OWNS the backend.
 ///
-/// The capnp `Server` methods return a `Promise` and cannot borrow an async
-/// `&mut self` across an await point, so the backend lives behind an
-/// `Rc<Mutex<..>>` shared into a per-call future. This keeps the whole thing on
-/// the actor's single thread (the server is `!Send`) while still allowing the
-/// backend's `send`/`recv` futures to suspend. The lock cannot deadlock a
-/// send against a recv: the `Channel` contract takes `&mut self`, so a single
-/// channel never has a send and a recv outstanding at once.
-struct BackendServer<C: Channel> {
-    backend: Rc<tokio::sync::Mutex<C>>,
+/// The backend must never sit locked across a parked `recv`: over RPC a
+/// caller can abandon a `recv` and then `send` — the abandoned call keeps
+/// running here — so a lock held across the recv await would queue that
+/// send behind a recv that only completes once the peer speaks, and two
+/// peers doing this deadlock against each other. The pump multiplexes
+/// instead: send commands are queued to it, received messages are buffered
+/// out of it, and no RPC call ever touches the backend directly.
+/// One queued send: the message plus the reply slot its RPC call awaits.
+type QueuedSend = (Vec<u8>, oneshot::Sender<Result<(), SendError>>);
+
+/// The pump's outbound buffer: received messages, or the fatal recv error.
+type ReceivedQueue = mpsc::Receiver<Result<Vec<u8>, RecvError>>;
+
+struct BackendServer {
+    send_tx: mpsc::Sender<QueuedSend>,
+    recv_rx: Rc<tokio::sync::Mutex<ReceivedQueue>>,
 }
 
-impl<C: Channel + 'static> channel::Server for BackendServer<C> {
+/// Drive one backend channel: execute queued sends and buffer received
+/// messages — the single owner the traits' `&mut self` pair requires.
+/// [`SendError::TooLarge`] is the one recoverable send error; any other
+/// send error, or any recv error, is the channel dying: the pump forwards
+/// it and exits, and later calls observe the closed queues as
+/// [`SendError::Closed`]/[`RecvError::Closed`].
+async fn pump_backend<C: Channel>(
+    mut channel: C,
+    mut sends: mpsc::Receiver<QueuedSend>,
+    received: mpsc::Sender<Result<Vec<u8>, RecvError>>,
+) {
+    enum Event {
+        Send(Option<QueuedSend>),
+        In(Result<Vec<u8>, RecvError>),
+    }
+    loop {
+        // The select resolves to a plain value first, so both branch futures
+        // are dropped before the channel is used again; recv is cancel-safe
+        // by the Channel contract, so losing the race loses no message.
+        let event = tokio::select! {
+            cmd = sends.recv() => Event::Send(cmd),
+            got = channel.recv() => Event::In(got),
+        };
+        match event {
+            Event::Send(Some((msg, reply))) => {
+                let result = channel.send(&msg).await;
+                let fatal = !matches!(result, Ok(()) | Err(SendError::TooLarge { .. }));
+                let _ = reply.send(result);
+                if fatal {
+                    return;
+                }
+            }
+            Event::Send(None) => return,
+            Event::In(got) => {
+                let fatal = got.is_err();
+                if received.send(got).await.is_err() || fatal {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+impl channel::Server for BackendServer {
     fn send(
         &mut self,
         params: channel::SendParams,
         _results: channel::SendResults,
     ) -> Promise<(), capnp::Error> {
         let msg = pry!(pry!(params.get()).get_msg()).to_vec();
-        let backend = self.backend.clone();
+        let send_tx = self.send_tx.clone();
         Promise::from_future(async move {
-            backend
-                .lock()
+            let (reply, done) = oneshot::channel();
+            send_tx
+                .send((msg, reply))
                 .await
-                .send(&msg)
-                .await
+                .map_err(|_| backend_send_error_to_capnp(SendError::Closed))?;
+            done.await
+                .map_err(|_| backend_send_error_to_capnp(SendError::Closed))?
                 .map_err(backend_send_error_to_capnp)
         })
     }
@@ -1189,13 +1241,14 @@ impl<C: Channel + 'static> channel::Server for BackendServer<C> {
         _params: channel::RecvParams,
         mut results: channel::RecvResults,
     ) -> Promise<(), capnp::Error> {
-        let backend = self.backend.clone();
+        let recv_rx = self.recv_rx.clone();
         Promise::from_future(async move {
-            let msg = backend
+            let msg = recv_rx
                 .lock()
                 .await
                 .recv()
                 .await
+                .unwrap_or(Err(RecvError::Closed))
                 .map_err(backend_recv_error_to_capnp)?;
             results.get().set_msg(&msg);
             Ok(())
@@ -1203,10 +1256,15 @@ impl<C: Channel + 'static> channel::Server for BackendServer<C> {
     }
 }
 
-/// Wrap a freshly produced backend channel as a new capnp `Channel` capability.
+/// Wrap a freshly produced backend channel as a new capnp `Channel`
+/// capability, spawning its pump on the serving task's local set.
 fn new_channel_client<C: Channel + 'static>(channel: C) -> channel::Client {
+    let (send_tx, sends) = mpsc::channel(8);
+    let (received, recv_rx) = mpsc::channel(8);
+    tokio::task::spawn_local(pump_backend(channel, sends, received));
     capnp_rpc::new_client(BackendServer {
-        backend: Rc::new(tokio::sync::Mutex::new(channel)),
+        send_tx,
+        recv_rx: Rc::new(tokio::sync::Mutex::new(recv_rx)),
     })
 }
 

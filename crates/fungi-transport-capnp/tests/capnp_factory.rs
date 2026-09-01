@@ -160,3 +160,36 @@ async fn configure_private_net_reaches_the_fixtures_over_capnp() {
         Some(&b"private-net-bytes"[..])
     );
 }
+
+/// CONCURRENCY: an abandoned recv must not wedge the channel. A select!-based
+/// consumer (the gossip driver) routinely issues a recv, loses the race,
+/// drops the future and then sends — but over RPC the abandoned recv keeps
+/// running on the plugin, so a serving layer that holds the backend locked
+/// across the recv await queues the send behind a recv that only completes
+/// once the peer speaks, and two peers doing this deadlock symmetrically.
+/// The final recvs also pin cancel-safety end to end: whatever the abandoned
+/// recv fetched reaches the next recv, not the void.
+#[tokio::test]
+async fn abandoned_recv_does_not_block_send() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let (mut a, mut b) = (client.unwrap(), server.unwrap());
+
+    // Park a recv on each end remotely, then abandon it locally.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), a.recv()).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), b.recv()).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), a.send(b"from-a"))
+        .await
+        .expect("send must not queue behind an abandoned recv")
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), b.send(b"from-b"))
+        .await
+        .expect("send must not queue behind an abandoned recv")
+        .unwrap();
+
+    assert_eq!(a.recv().await.unwrap(), b"from-b");
+    assert_eq!(b.recv().await.unwrap(), b"from-a");
+}
