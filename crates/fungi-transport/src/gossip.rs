@@ -482,12 +482,102 @@ mod tests {
     use super::*;
     use crate::channel::Channel;
     use crate::mem::{MemConfig, duplex};
+    use crate::testkit;
     use std::time::Duration;
 
     fn cfg() -> MemConfig {
         MemConfig {
             capacity: Some(16),
             ..MemConfig::default()
+        }
+    }
+
+    /// A full graph of n gossip nodes over pairwise mem duplexes.
+    fn mem_full_graph(n: usize, max_msg_len: Option<usize>) -> Vec<GossipBroadcast> {
+        let mut per_node: Vec<Vec<crate::mem::MemChannel>> = (0..n).map(|_| Vec::new()).collect();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (a, b) = duplex(cfg());
+                per_node[i].push(a);
+                per_node[j].push(b);
+            }
+        }
+        per_node
+            .into_iter()
+            .map(|chs| {
+                let g = GossipBroadcast::new(chs);
+                match max_msg_len {
+                    Some(max) => g.with_max_msg_len(max),
+                    None => g,
+                }
+            })
+            .collect()
+    }
+
+    // CONFORMANCE (broadcast trait contract) — the same generic suite the
+    // mem group passes: gossip IS a BroadcastChannel, as an executable
+    // assertion.
+    #[tokio::test]
+    async fn conformance_broadcast_reaches_all_others() {
+        testkit::broadcast_reaches_all_others(mem_full_graph(3, None)).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_broadcast_recv_is_cancel_safe() {
+        testkit::broadcast_recv_is_cancel_safe(mem_full_graph(2, None)).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_broadcast_too_large_is_recoverable() {
+        testkit::broadcast_too_large_is_recoverable(mem_full_graph(2, Some(16)), 16).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_closed_after_group_drop() {
+        testkit::closed_after_group_drop(mem_full_graph(3, None)).await;
+    }
+
+    // Line topology A—B—C with B as a PASSIVE relay: B never calls recv,
+    // yet A's message reaches C — forwarding rides on the hub, not on the
+    // consumer.
+    #[tokio::test]
+    async fn line_relays_through_a_passive_middle_node() {
+        let (a_ab, b_ab) = duplex(cfg());
+        let (b_bc, c_bc) = duplex(cfg());
+        let mut a = GossipBroadcast::new(vec![a_ab]);
+        let _b = GossipBroadcast::new(vec![b_ab, b_bc]); // alive, never consumed
+        let mut c = GossipBroadcast::new(vec![c_bc]);
+        a.send(b"through").await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), c.recv())
+            .await
+            .expect("the passive middle node must relay")
+            .unwrap();
+        assert_eq!(got, b"through");
+    }
+
+    // Triangle: duplicates arrive over the redundant paths and are
+    // forwarded/delivered only on first sight — each node sees each
+    // message exactly once.
+    #[tokio::test]
+    async fn triangle_dedups_redundant_paths() {
+        let mut nodes = mem_full_graph(3, None);
+        nodes[0].send(b"from-a").await.unwrap();
+        nodes[1].send(b"from-b").await.unwrap();
+        nodes[2].send(b"from-c").await.unwrap();
+        let expected = [b"from-a".to_vec(), b"from-b".to_vec(), b"from-c".to_vec()];
+        for (i, node) in nodes.iter_mut().enumerate() {
+            let mut got = vec![node.recv().await.unwrap(), node.recv().await.unwrap()];
+            got.sort();
+            let mut want: Vec<Vec<u8>> = expected
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, m)| m.clone())
+                .collect();
+            want.sort();
+            assert_eq!(got, want, "node {i} must see the other two exactly once");
+            let dup = tokio::time::timeout(Duration::from_millis(50), node.recv()).await;
+            assert!(dup.is_err(), "no duplicates may be delivered");
         }
     }
 
@@ -504,20 +594,6 @@ mod tests {
         assert_eq!(a.recv().await.unwrap(), b"from-b");
         let echo = tokio::time::timeout(Duration::from_millis(50), a.recv()).await;
         assert!(echo.is_err(), "a sender must not receive its own broadcast");
-    }
-
-    // The one recoverable send error, checked in the object before any link.
-    #[tokio::test]
-    async fn too_large_is_recoverable() {
-        let (ab, ba) = duplex(cfg());
-        let mut a = GossipBroadcast::new(vec![ab]).with_max_msg_len(4);
-        let mut b = GossipBroadcast::new(vec![ba]);
-        assert!(matches!(
-            a.send(b"oversized").await,
-            Err(SendError::TooLarge { max: 4 })
-        ));
-        a.send(b"ok").await.unwrap();
-        assert_eq!(b.recv().await.unwrap(), b"ok");
     }
 
     // One channel, one fate: when the peer's whole node goes away, this
