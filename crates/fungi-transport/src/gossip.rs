@@ -57,7 +57,9 @@ use crate::session::SessionId;
 /// - The `seen` set holds every distinct message for the channel's life.
 /// - Constructed with zero channels, sends are vacuously `Ok` and `recv`
 ///   reports the channel dead (mirroring the in-memory group); a group
-///   that LOST all its links is dead in both directions.
+///   that LOST all its links is dead in both directions. The local
+///   `with_max_msg_len` check still applies, though: an oversized send
+///   fails `TooLarge` even with zero links.
 #[derive(Debug)]
 pub struct GossipBroadcast {
     /// `None` when constructed with zero channels: vacuous sends.
@@ -833,6 +835,18 @@ mod tests {
         let mut g = GossipBroadcast::new(Vec::<crate::mem::MemChannel>::new());
         g.send(b"into the void").await.unwrap();
         assert!(matches!(g.recv().await, Err(RecvError::Closed)));
+    }
+
+    // The local size check runs before any link concern, so it outranks
+    // the empty-group vacuous Ok: zero links does not exempt an oversized
+    // send.
+    #[tokio::test]
+    async fn empty_group_still_enforces_max_msg_len() {
+        let mut g = GossipBroadcast::new(Vec::<crate::mem::MemChannel>::new()).with_max_msg_len(4);
+        assert!(matches!(
+            g.send(b"oversized").await,
+            Err(SendError::TooLarge { max: 4 })
+        ));
     }
 
     // A simultaneous burst inside the configured bounds converges fully:
