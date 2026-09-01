@@ -96,6 +96,13 @@ rec {
     # from NixOS's services.tor.client.enable, which contributes its own
     # SOCKSPort entry. Setting one here too would concatenate into two
     # binds on the same port, which is fatal at tor startup.
+    #
+    # Full server descriptors instead of microdescriptors: at this net's
+    # 1-minute voting cadence each consensus re-references churning
+    # microdescs faster than a client fetches them, so directory info
+    # decays (half the microdescs held, ~1/3 of paths buildable) until a
+    # late-run onion rendezvous cannot complete.
+    UseMicrodescriptors = false;
     ControlPort = 9051;
     # Null control auth on localhost: matches the backend's ControlAuth::Null.
     CookieAuthentication = false;
