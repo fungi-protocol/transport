@@ -32,7 +32,8 @@
 //!   where attribution is per message (a group has many senders). A
 //!   broadcast implementation reaches the group however it likes — gossip
 //!   over P2P channels, a server-side broadcast API — and consumers cannot
-//!   tell the difference; [`mem::group`] is the in-memory one.
+//!   tell the difference; [`mem::group`] is the in-memory one,
+//!   [`gossip::GossipBroadcast`] the production one.
 //!
 //! Real transports live in their own crates: `fungi-transport-socks5h`
 //! (external tor daemon) and `fungi-transport-arti` (in-process arti).

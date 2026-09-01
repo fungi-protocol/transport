@@ -266,7 +266,8 @@ pub trait AttributableChannel: Send {
 ///   error, and any other `send` error, means the channel is DEAD; recovery
 ///   is a new channel from the construction layer, never this one.
 /// - Buffering is internal and the overflow policy is implementation-
-///   defined; a receiver that falls too far behind finds the channel dead.
+///   defined; a receiver that falls too far behind may find messages
+///   dropped, or the channel dead.
 /// - No ordering guarantees, no deduplication.
 ///
 /// Propagation is the implementation's job, below this trait: however the

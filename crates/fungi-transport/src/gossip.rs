@@ -57,7 +57,7 @@ use crate::session::SessionId;
 /// - The `seen` set holds every distinct message for the channel's life.
 /// - Constructed with zero channels, sends are vacuously `Ok` and `recv`
 ///   reports the channel dead (mirroring the in-memory group); a group
-///   that LOST all its links is dead in both directions. The local
+///   that LOST a link is dead in both directions. The local
 ///   `with_max_msg_len` check still applies, though: an oversized send
 ///   fails `TooLarge` even with zero links.
 #[derive(Debug)]
