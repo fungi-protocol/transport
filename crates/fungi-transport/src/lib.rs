@@ -54,7 +54,10 @@ pub use channel::{
     ListenParams, Listener, RecvHalf, SendHalf, SplitChannel, Transport, into_stream,
 };
 pub use error::{BoxError, ConnectError, RecvError, SendError};
-pub use gossip::{GossipBroadcast, GossipConfig, GossipError, QueueKind};
+pub use gossip::{
+    DialRetry, GossipBroadcast, GossipConfig, GossipError, ListenSide, QueueKind, WireConfig,
+    Wiring,
+};
 pub use harness::{dial_sequence, echo_one_peer};
 pub use sender::SenderId;
 pub use session::{ParseSessionIdError, SessionId};

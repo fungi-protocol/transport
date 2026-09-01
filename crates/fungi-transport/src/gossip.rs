@@ -13,12 +13,17 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::channel::{BroadcastChannel, RecvHalf, SendHalf, SplitChannel};
-use crate::error::{RecvError, SendError};
+use crate::channel::{
+    BroadcastChannel, Connector, ListenParams, Listener, RecvHalf, SendHalf, SplitChannel,
+    Transport,
+};
+use crate::error::{ConnectError, RecvError, SendError};
+use crate::session::SessionId;
 
 /// Naive gossip over a fixed set of P2P channels, as a broadcast channel:
 /// the first production implementation of [`BroadcastChannel`] — the
@@ -158,7 +163,7 @@ impl GossipBroadcast {
     /// Build a gossip node over already-established channels (one per
     /// peer link). The channels must form a connected graph across the
     /// group or messages cannot reach everyone — wiring the graph is the
-    /// caller's job (a future `wire` layer).
+    /// caller's job (see [`Wiring`]).
     pub fn new<C: SplitChannel + 'static>(channels: Vec<C>) -> Self {
         Self::with_config(channels, GossipConfig::default())
     }
@@ -477,6 +482,185 @@ impl BroadcastChannel for GossipBroadcast {
     }
 }
 
+/// The accepting side of a fixed-membership group.
+#[derive(Debug)]
+pub struct ListenSide {
+    /// Listener parameters ([`ListenParams`]): virtual port and identity
+    /// hint.
+    pub params: ListenParams,
+    /// How many inbound links to accept before the group is complete.
+    pub accept: u16,
+}
+
+/// Caller-supplied dial cadence. Retry cadence is the caller's business
+/// (the [`Connector`] contract), so the caller states it here explicitly
+/// — the wiring only mechanizes it. No hidden defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct DialRetry {
+    /// Overall budget for one address, across attempts. `None` retries
+    /// until the dial succeeds — no deadline of any kind, for a caller
+    /// whose only acceptable outcome is a connected peer; ending that wait
+    /// is then something else's job.
+    pub deadline: Option<Duration>,
+    /// Bound on a single connect attempt.
+    pub attempt_timeout: Duration,
+    /// Pause between failed attempts.
+    pub pause: Duration,
+}
+
+/// Fixed membership for one gossip group: whom to accept and whom to dial.
+/// This is the peer-network notion for naive gossip: addresses are supplied
+/// out of band and the resulting links must form a connected graph for the
+/// lifetime of the group. Discovery, peer databases, dynamic membership,
+/// reconnection, and transport advertisement are deliberately outside it.
+#[derive(Debug)]
+pub struct WireConfig<A> {
+    /// The accepting side, when this node publishes an address.
+    pub listen: Option<ListenSide>,
+    /// Peers to dial.
+    pub dials: Vec<A>,
+    /// The dial cadence for every address in `dials`.
+    pub dial_retry: DialRetry,
+    /// Dial on this logical session's isolated circuits
+    /// ([`Transport::connector_for`]); `None` uses the shared default
+    /// connector. A gossip group serving one protocol session is exactly
+    /// what per-session isolation exists for.
+    pub session: Option<SessionId>,
+}
+
+/// Two-phase wiring: a listener must publish its address BEFORE its peers
+/// can dial it, so [`start`](Wiring::start) performs the listen and
+/// returns the published address for the caller to hand out, and
+/// [`establish`](Wiring::establish) then accepts the inbound links and
+/// dials every address. The accept and dial sides run concurrently so a
+/// node that has both roles cannot deadlock with another mixed-role node.
+#[derive(Debug)]
+pub struct Wiring<T: Transport> {
+    listener: Option<(T::Listener, u16)>,
+    connector: T::Connector,
+    dials: Vec<T::Addr>,
+    retry: DialRetry,
+}
+
+impl<T: Transport> Wiring<T>
+where
+    T::Listener: Listener<Channel = <T::Connector as Connector>::Channel>,
+{
+    /// Phase one: create the listener (publishing this node's address, if
+    /// it has an accepting side) and capture the connector. Returns the
+    /// published address for the caller to distribute out of band.
+    pub async fn start(
+        transport: &T,
+        cfg: WireConfig<T::Addr>,
+    ) -> Result<(Self, Option<T::Addr>), ConnectError> {
+        let connector = match &cfg.session {
+            Some(session) => transport.connector_for(session),
+            None => transport.connector(),
+        };
+        let (listener, addr) = match cfg.listen {
+            Some(side) => {
+                let (listener, addr) = transport.listen(side.params).await?;
+                (Some((listener, side.accept)), Some(addr))
+            }
+            None => (None, None),
+        };
+        Ok((
+            Self {
+                listener,
+                connector,
+                dials: cfg.dials,
+                retry: cfg.dial_retry,
+            },
+            addr,
+        ))
+    }
+
+    /// Phase two: concurrently accept the configured inbound links and dial
+    /// every address with the configured cadence. Any hard failure fails
+    /// the whole wiring — a partially wired group is not a group. Accepting
+    /// blocks until the configured number of inbound links arrives — there
+    /// is no accept timeout; a caller that needs one bounds this call
+    /// externally. The returned channels are deterministic: accepted links
+    /// first, then dialed links, in their respective configuration order.
+    pub async fn establish(
+        self,
+    ) -> Result<Vec<<T::Connector as Connector>::Channel>, ConnectError> {
+        self.establish_with(|_, _| {}).await
+    }
+
+    /// [`establish`](Wiring::establish) with a per-attempt observer:
+    /// `on_attempt` is called with the address and error of every failed
+    /// connect attempt (the terminal one included) — the caller's hook
+    /// for retry logging, since the wiring itself stays silent.
+    pub async fn establish_with<F>(
+        self,
+        mut on_attempt: F,
+    ) -> Result<Vec<<T::Connector as Connector>::Channel>, ConnectError>
+    where
+        F: FnMut(&T::Addr, &ConnectError),
+    {
+        let Self {
+            listener,
+            connector,
+            dials,
+            retry,
+        } = self;
+        let accept_side = async move {
+            let mut channels = Vec::new();
+            if let Some((mut listener, accept)) = listener {
+                for _ in 0..accept {
+                    channels.push(listener.accept().await?);
+                }
+            }
+            Ok::<_, ConnectError>(channels)
+        };
+        let dial_side = async move {
+            let mut channels = Vec::with_capacity(dials.len());
+            for addr in &dials {
+                let deadline = retry
+                    .deadline
+                    .map(|budget| tokio::time::Instant::now() + budget);
+                let channel = loop {
+                    // Cap the attempt at what is left of the budget, so one
+                    // address can never run past its deadline — the "overall
+                    // budget" the docs promise, with no slop.
+                    let attempt_end = {
+                        let end = tokio::time::Instant::now() + retry.attempt_timeout;
+                        match deadline {
+                            Some(deadline) => end.min(deadline),
+                            None => end,
+                        }
+                    };
+                    let attempt =
+                        tokio::time::timeout_at(attempt_end, connector.connect(addr)).await;
+                    let err = match attempt {
+                        Ok(Ok(channel)) => break channel,
+                        Ok(Err(e)) => e,
+                        // An attempt that timed out is just a failed attempt,
+                        // not a fatal one.
+                        Err(_) => ConnectError::Transport("connect attempt timed out".into()),
+                    };
+                    on_attempt(addr, &err);
+                    // Retry only if the pause leaves any budget before the
+                    // deadline. The next attempt is capped at whatever time
+                    // remains; a caller that set no deadline always retries.
+                    if deadline.is_some_and(|deadline| {
+                        tokio::time::Instant::now() + retry.pause >= deadline
+                    }) {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(retry.pause).await;
+                };
+                channels.push(channel);
+            }
+            Ok::<_, ConnectError>(channels)
+        };
+        let (mut accepted, dialed) = tokio::try_join!(accept_side, dial_side)?;
+        accepted.extend(dialed);
+        Ok(accepted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +935,208 @@ mod tests {
                 output: QueueKind::Consumer
             })
         ));
+    }
+
+    // Two-phase wiring over the mem transport: B starts (publishing its
+    // address), A and C dial with an explicit cadence, B establishes both
+    // inbound links — and the three wired nodes gossip to convergence.
+    #[tokio::test]
+    async fn wiring_builds_a_line_that_converges() {
+        use crate::channel::ListenParams;
+        use crate::mem::{MemAddr, MemConfig, MemTransport};
+
+        let transport = MemTransport::new(MemConfig {
+            capacity: Some(16),
+            ..MemConfig::default()
+        });
+        let retry = || DialRetry {
+            deadline: Some(Duration::from_secs(2)),
+            attempt_timeout: Duration::from_secs(1),
+            pause: Duration::from_millis(10),
+        };
+        let (b_wiring, addr) = Wiring::start(
+            &transport,
+            WireConfig {
+                listen: Some(ListenSide {
+                    params: ListenParams::new(1),
+                    accept: 2,
+                }),
+                dials: vec![],
+                dial_retry: retry(),
+                session: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(addr, Some(MemAddr));
+
+        let dial_cfg = || WireConfig {
+            listen: None,
+            dials: vec![MemAddr],
+            dial_retry: retry(),
+            session: None,
+        };
+        let a_cfg = dial_cfg();
+        let c_cfg = dial_cfg();
+        let (b_chs, a_res, c_res) = tokio::join!(
+            b_wiring.establish(),
+            async {
+                let (w, addr) = Wiring::start(&transport, a_cfg).await.unwrap();
+                assert_eq!(addr, None);
+                w.establish().await
+            },
+            async {
+                let (w, _) = Wiring::start(&transport, c_cfg).await.unwrap();
+                w.establish().await
+            },
+        );
+        let mut b = GossipBroadcast::new(b_chs.unwrap());
+        let mut a = GossipBroadcast::new(a_res.unwrap());
+        let mut c = GossipBroadcast::new(c_res.unwrap());
+
+        a.send(b"from-a").await.unwrap();
+        b.send(b"from-b").await.unwrap();
+        c.send(b"from-c").await.unwrap();
+        let mut got_a = vec![a.recv().await.unwrap(), a.recv().await.unwrap()];
+        let mut got_c = vec![c.recv().await.unwrap(), c.recv().await.unwrap()];
+        got_a.sort();
+        got_c.sort();
+        assert_eq!(got_a, vec![b"from-b".to_vec(), b"from-c".to_vec()]);
+        assert_eq!(got_c, vec![b"from-a".to_vec(), b"from-b".to_vec()]);
+    }
+
+    // A node may accept and dial in the same membership. Both sides must
+    // progress together: running accepts first would wait forever before
+    // the dial that supplies the inbound link is ever polled.
+    #[tokio::test]
+    async fn wiring_with_both_roles_does_not_deadlock() {
+        use crate::channel::ListenParams;
+        use crate::mem::{MemAddr, MemConfig, MemTransport};
+
+        let transport = MemTransport::new(MemConfig::default());
+        let (wiring, addr) = Wiring::start(
+            &transport,
+            WireConfig {
+                listen: Some(ListenSide {
+                    params: ListenParams::new(1),
+                    accept: 1,
+                }),
+                dials: vec![MemAddr],
+                dial_retry: DialRetry {
+                    deadline: Some(Duration::from_secs(1)),
+                    attempt_timeout: Duration::from_millis(100),
+                    pause: Duration::from_millis(10),
+                },
+                session: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(addr, Some(MemAddr));
+
+        let channels = tokio::time::timeout(Duration::from_secs(1), wiring.establish())
+            .await
+            .expect("accept and dial sides must make progress together")
+            .unwrap();
+        assert_eq!(channels.len(), 2);
+    }
+
+    // No deadline means no giving up: against the same permanently blocked
+    // transport, the dial that would have expired keeps retrying instead —
+    // the shape a caller asks for when only a connected peer will do.
+    #[tokio::test(start_paused = true)]
+    async fn a_dial_without_a_deadline_never_gives_up() {
+        use crate::mem::{MemAddr, MemConfig, MemTransport};
+
+        let transport = MemTransport::new(MemConfig::default());
+        let connector = transport.connector();
+        let mut fillers = Vec::new();
+        for _ in 0..8 {
+            fillers.push(connector.connect(&MemAddr).await.unwrap());
+        }
+
+        let (wiring, _addr) = Wiring::start(
+            &transport,
+            WireConfig {
+                listen: None,
+                dials: vec![MemAddr],
+                dial_retry: DialRetry {
+                    deadline: None,
+                    attempt_timeout: Duration::from_millis(20),
+                    pause: Duration::from_millis(10),
+                },
+                session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Far past any budget the bounded variant would have spent.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(60), wiring.establish())
+                .await
+                .is_err(),
+            "a dial with no deadline must still be trying"
+        );
+        drop(fillers);
+    }
+
+    // A dial attempt that times out must be retried, not treated as fatal:
+    // fill the mem transport's inbound queue (capacity 8, no listener ever
+    // draining it) so every connect attempt hangs, then confirm establish
+    // keeps retrying across several attempt_timeouts and gives up within
+    // the overall per-address deadline — never past it.
+    #[tokio::test(start_paused = true)]
+    async fn establish_retries_a_timed_out_dial_within_the_deadline() {
+        use crate::mem::{MemAddr, MemConfig, MemTransport};
+
+        let transport = MemTransport::new(MemConfig::default());
+        let connector = transport.connector();
+        // Saturate the fixed 8-slot inbound queue; with no listener ever
+        // created, nothing drains it and any further connect blocks
+        // forever.
+        let mut fillers = Vec::new();
+        for _ in 0..8 {
+            fillers.push(connector.connect(&MemAddr).await.unwrap());
+        }
+
+        let (wiring, _addr) = Wiring::start(
+            &transport,
+            WireConfig {
+                listen: None,
+                dials: vec![MemAddr],
+                dial_retry: DialRetry {
+                    deadline: Some(Duration::from_millis(120)),
+                    attempt_timeout: Duration::from_millis(20),
+                    pause: Duration::from_millis(10),
+                },
+                session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_millis(500), wiring.establish())
+            .await
+            .expect("a timed-out attempt must not hang past the dial deadline");
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "every attempt hangs, so the dial exhausts its budget"
+        );
+        // At ~30ms per full attempt (20ms timeout + 10ms pause) against a
+        // 120ms deadline, several attempts must have happened. The final one
+        // may be shorter because every attempt is capped at the hard deadline.
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "several attempts must run before giving up: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= Duration::from_millis(120),
+            "must never run past the per-address deadline: {elapsed:?}"
+        );
+        drop(fillers);
     }
 }
