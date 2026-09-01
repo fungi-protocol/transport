@@ -7,7 +7,10 @@
 use std::time::Duration;
 
 use fungi_transport::harness::{dial_sequence, echo_one_peer};
-use fungi_transport::{Connector, ListenParams, Listener, OnionAddr, SessionId, Transport};
+use fungi_transport::{
+    BroadcastChannel, Connector, DialRetry, GossipBroadcast, ListenParams, ListenSide, Listener,
+    OnionAddr, SessionId, SplitChannel, Transport, WireConfig, Wiring,
+};
 
 /// Bounded wait for every network step: the VM test must fail, not hang.
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -50,7 +53,8 @@ pub(crate) enum Cmd {
         dials: Vec<OnionAddr>,
         /// This node's own message.
         message: Vec<u8>,
-        /// Distinct messages (own included) that mean convergence.
+        /// Distinct messages (own included) that mean convergence. Every
+        /// participant in one run must use the same total.
         expect: usize,
     },
 }
@@ -217,10 +221,10 @@ where
     Ok(())
 }
 
-/// Gossip over any backend: optionally listen and accept `listen_peers`
-/// inbound links, dial every `--dial` target (retrying inside the command,
-/// since the process must stay up to serve its listen side), then run
-/// naive gossip to convergence and print the converged set.
+/// Gossip over any backend: wire the group with [`fungi_transport::gossip`]
+/// (optionally accepting `listen_peers` inbound links, dialing every
+/// `--dial` target with the harness's own retry cadence), then run naive
+/// gossip to convergence and print the converged set.
 pub(crate) async fn run_gossip<T>(
     transport: T,
     virt_port: Option<u16>,
@@ -231,57 +235,107 @@ pub(crate) async fn run_gossip<T>(
 ) -> Result<(), String>
 where
     T: Transport,
-    T::Addr: std::fmt::Display,
-    <T::Connector as Connector>::Channel: 'static,
+    T::Addr: std::fmt::Display + Clone,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
     T::Listener: Listener<Channel = <T::Connector as Connector>::Channel>,
 {
-    let mut channels = Vec::new();
-    if let Some(port) = virt_port {
-        let params = ListenParams::new(port).with_nickname("fungigossip");
-        let (mut listener, addr) = tokio::time::timeout(STEP_TIMEOUT, transport.listen(params))
-            .await
-            .map_err(|_| "listen timed out".to_string())?
-            .map_err(|e| e.to_string())?;
+    let retry = DialRetry {
+        deadline: Some(ACCEPT_TIMEOUT),
+        attempt_timeout: STEP_TIMEOUT,
+        pause: Duration::from_secs(10),
+    };
+    let cfg = WireConfig {
+        listen: virt_port.map(|port| ListenSide {
+            params: ListenParams::new(port).with_nickname("fungigossip"),
+            accept: listen_peers,
+        }),
+        dials: dials.to_vec(),
+        dial_retry: retry,
+        session: None,
+    };
+    let (wiring, addr) = tokio::time::timeout(STEP_TIMEOUT, Wiring::start(&transport, cfg))
+        .await
+        .map_err(|_| "listen timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    if let Some(addr) = addr {
         println!("ONION={addr}");
         println!("READY");
-        for _ in 0..listen_peers {
-            let ch = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
-                .await
-                .map_err(|_| "accept timed out".to_string())?
-                .map_err(|e| e.to_string())?;
-            channels.push(ch);
-        }
     }
-    let connector = transport.connector();
-    for target in dials {
-        // In-command retry: the onion-descriptor publication race is
-        // otherwise absorbed by the VM script retrying the whole command,
-        // which a long-lived gossip node cannot afford.
-        let deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
-        let ch = loop {
-            match tokio::time::timeout(STEP_TIMEOUT, connector.connect(target)).await {
-                Ok(Ok(ch)) => break ch,
-                Ok(Err(e)) if tokio::time::Instant::now() < deadline => {
-                    eprintln!("dial {target} failed ({e}); retrying");
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                }
-                Ok(Err(e)) => return Err(format!("dial {target}: {e}")),
-                Err(_) => return Err("connect timed out".to_string()),
-            }
-        };
-        channels.push(ch);
-    }
-    let set = tokio::time::timeout(
-        STEP_TIMEOUT,
-        fungi_transport::harness::gossip_until(channels, message, expect),
+    // Aggregate of the per-step budgets: establish runs its accepts and
+    // dials sequentially, so its bound is one ACCEPT_TIMEOUT per accept
+    // plus one dial deadline per address (plus a step of slack) — the
+    // same total the pre-wiring code gave each step its own clock for.
+    let accepts = if virt_port.is_some() {
+        u32::from(listen_peers)
+    } else {
+        0
+    };
+    let dial_budget = retry.deadline.unwrap_or(ACCEPT_TIMEOUT) * dials.len() as u32;
+    let establish_budget = ACCEPT_TIMEOUT * accepts + dial_budget + STEP_TIMEOUT;
+    let channels = tokio::time::timeout(
+        establish_budget,
+        // Every failed attempt lands in the VM test's stderr capture —
+        // the only record of what a node saw when a run goes bad.
+        wiring.establish_with(|addr, e| eprintln!("dial {addr} attempt failed: {e}")),
     )
     .await
-    .map_err(|_| "gossip convergence timed out".to_string())??;
+    .map_err(|_| "wiring timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let mut node = GossipBroadcast::new(channels);
+    let converged = tokio::time::timeout(STEP_TIMEOUT, collect_gossip(&mut node, &message, expect))
+        .await
+        .unwrap_or_else(|_| Err("gossip convergence timed out".to_string()));
+    // Drain whether or not the set converged. On success this flushes the
+    // forwards peers still need — normal peer closure is already tolerated by
+    // `shutdown`, so anything left means the convergence proof is incomplete
+    // and must suppress `OK`. On failure it is the only path that reports WHY
+    // the engine gave up (a timed-out forward, a saturated queue); a bare
+    // "links closed" would leave the VM log with no cause.
+    let drained = shutdown_gossip(node).await;
+    let set = match (converged, drained) {
+        (Ok(set), Ok(())) => set,
+        (Err(convergence), Err(drain)) => return Err(format!("{convergence}; {drain}")),
+        (Err(failure), Ok(())) | (Ok(_), Err(failure)) => return Err(failure),
+    };
     for msg in &set {
         println!("MSG={}", String::from_utf8_lossy(msg));
     }
     println!("OK");
     Ok(())
+}
+
+/// Publish one node's message and collect the distinct set expected by one
+/// harness run. Every participant must use the same `expect` total.
+async fn collect_gossip(
+    node: &mut GossipBroadcast,
+    message: &[u8],
+    expect: usize,
+) -> Result<std::collections::BTreeSet<Vec<u8>>, String> {
+    let mut set = std::collections::BTreeSet::new();
+    set.insert(message.to_vec());
+    node.send(message).await.map_err(|e| e.to_string())?;
+    while set.len() < expect {
+        match node.recv().await {
+            Ok(msg) => {
+                set.insert(msg);
+            }
+            Err(_) => {
+                return Err(format!(
+                    "links closed holding {}/{expect} messages",
+                    set.len()
+                ));
+            }
+        }
+    }
+    Ok(set)
+}
+
+async fn shutdown_gossip(node: GossipBroadcast) -> Result<(), String> {
+    tokio::time::timeout(STEP_TIMEOUT, node.shutdown())
+        .await
+        .map_err(|_| "shutdown drain timed out".to_string())?
+        .map_err(|e| format!("shutdown drain failed: {e}"))
 }
 
 /// Drive the parsed command over a plugin subprocess: spawn `cli.plugin` and
@@ -647,9 +701,10 @@ mod tests {
         ));
         let dial_gossip = |conn: fungi_transport::mem::MemConnector, own: &'static [u8]| async move {
             let ch = conn.connect(&MemAddr).await.unwrap();
-            fungi_transport::harness::gossip_until(vec![ch], own.to_vec(), 3)
-                .await
-                .unwrap()
+            let mut node = GossipBroadcast::new(vec![ch]);
+            let set = collect_gossip(&mut node, own, 3).await.unwrap();
+            node.shutdown().await.unwrap();
+            set
         };
         let (sa, sc) = tokio::join!(
             dial_gossip(conn_a, b"from-a"),
@@ -658,5 +713,24 @@ mod tests {
         b.await.unwrap().unwrap();
         assert_eq!(sa, sc);
         assert_eq!(sa.len(), 3);
+    }
+
+    // A locally complete set is not enough to print OK: an owed forward may
+    // still fail during drain, and that failure must reach the command caller.
+    #[tokio::test]
+    async fn gossip_shutdown_propagates_an_unflushed_forward() {
+        use fungi_transport::BroadcastChannel;
+        use fungi_transport::mem::{MemConfig, duplex};
+
+        let (ab, _ba) = duplex(MemConfig::default());
+        ab.fail_next(1);
+        let mut node = GossipBroadcast::new(vec![ab]);
+        node.send(b"owed").await.unwrap();
+
+        let error = shutdown_gossip(node).await.unwrap_err();
+        assert!(
+            error.contains("shutdown drain failed: gossip forward on link 0 failed"),
+            "unexpected shutdown diagnostic: {error}"
+        );
     }
 }

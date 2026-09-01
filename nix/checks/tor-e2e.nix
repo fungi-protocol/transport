@@ -21,7 +21,9 @@
         # the sum of the per-step budgets, so a slow-but-passing run fails at a
         # clean per-step timeout rather than being cut off mid-step as an opaque
         # global timeout.
-        # The gossip step adds up to ~1600s of per-step budget on top of the dial steps.
+        # The gossip step adds up to ~3000s of per-node budget on the listening
+        # node (wiring accepts and dials, then convergence and drain) on top of
+        # the dial steps.
         globalTimeout = 7200;
         nodes = let
           fingerprints = import ../tor-test-net/fingerprints.nix;
