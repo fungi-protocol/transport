@@ -1,0 +1,12 @@
+[package]
+name = "fungi-convergence"
+description = "Transport-independent convergence messages for the Fungi protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true
