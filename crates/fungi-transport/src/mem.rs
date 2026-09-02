@@ -614,6 +614,18 @@ mod tests {
         testkit::recv_is_cancel_safe(a, b).await;
     }
 
+    // One slot per direction, so every send after the first waits on the
+    // peer: the shape that deadlocks a pair driven through `Channel` alone.
+    #[tokio::test]
+    async fn mutual_bursts_converge() {
+        let cfg = MemConfig {
+            capacity: Some(1),
+            ..MemConfig::default()
+        };
+        let (a, b) = duplex(cfg);
+        testkit::mutual_bursts_converge(a, b, 64).await;
+    }
+
     // MOCK-SPECIFIC (NOT part of the trait contract, NOT inherited by
     // real transports): this pipe happens to be FIFO per direction; bench
     // scenarios rely on it.

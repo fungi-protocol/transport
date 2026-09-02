@@ -550,4 +550,18 @@ mod tests {
         let err = last.expect("send never errored after peer drop");
         assert!(matches!(err, SendError::Closed));
     }
+
+    // The property the split exists for, on the layer the real backends use:
+    // two peers pushing while draining each other over a pipe too narrow to
+    // hold more than a frame, so every write after the first waits on the
+    // reader. Driven through `Channel` alone this pair deadlocks.
+    #[tokio::test]
+    async fn mutual_bursts_converge_over_a_narrow_stream() {
+        // Frames here are 6 bytes (4-byte prefix + 2-byte payload), so an
+        // 8-byte pipe cannot hold two of them.
+        let (a, b) = tokio::io::duplex(8);
+        let a = FramedChannel::new(a, DEFAULT_MAX_MSG_LEN);
+        let b = FramedChannel::new(b, DEFAULT_MAX_MSG_LEN);
+        testkit::mutual_bursts_converge(a, b, 64).await;
+    }
 }

@@ -33,11 +33,9 @@ async fn loopback_roundtrip_over_capnp() {
 /// traverses capnp-rpc on every hop, so the pair can be fed to the generic
 /// same-type conformance functions. The server thread handles are detached
 /// (they live until their stream closes) and dropped here.
-fn crossed_capnp_pair() -> (CapnpChannel, CapnpChannel) {
-    // Capacity > 1 so two queued sends do not block before the peer drains
-    // (mirrors the mem crate's own conformance setup).
+fn crossed_capnp_pair(capacity: usize) -> (CapnpChannel, CapnpChannel) {
     let cfg = MemConfig {
-        capacity: Some(8),
+        capacity: Some(capacity),
         ..MemConfig::default()
     };
     let (mem_a, mem_b) = duplex(cfg);
@@ -57,8 +55,17 @@ fn crossed_capnp_pair() -> (CapnpChannel, CapnpChannel) {
 /// bridge is a faithful `Channel`, not just a one-shot pipe.
 #[tokio::test]
 async fn conformance_over_capnp() {
-    let (capnp_a, capnp_b) = crossed_capnp_pair();
+    let (capnp_a, capnp_b) = crossed_capnp_pair(8);
     testkit::roundtrip_both_directions(capnp_a, capnp_b).await;
+}
+
+/// The server bridge must preserve the backend's full-duplex capability: with
+/// one slot per direction, both peers have to keep receiving while their
+/// outbound bursts apply backpressure.
+#[tokio::test]
+async fn mutual_bursts_converge_over_capnp() {
+    let (capnp_a, capnp_b) = crossed_capnp_pair(1);
+    testkit::mutual_bursts_converge(capnp_a, capnp_b, 64).await;
 }
 
 /// Proves the C1 fix: a dropped `recv` future loses no message across the Send
@@ -66,7 +73,7 @@ async fn conformance_over_capnp() {
 /// caller until the next `recv` claims it.
 #[tokio::test]
 async fn cancel_safe_over_capnp() {
-    let (capnp_a, capnp_b) = crossed_capnp_pair();
+    let (capnp_a, capnp_b) = crossed_capnp_pair(8);
     testkit::recv_is_cancel_safe(capnp_a, capnp_b).await;
 }
 
@@ -75,7 +82,7 @@ async fn cancel_safe_over_capnp() {
 /// maps back to `RecvError::Closed`), not as an opaque `Transport` error.
 #[tokio::test]
 async fn closed_propagates_over_capnp() {
-    let (capnp_a, capnp_b) = crossed_capnp_pair();
+    let (capnp_a, capnp_b) = crossed_capnp_pair(8);
     testkit::closed_after_peer_drop(capnp_a, capnp_b).await;
 }
 

@@ -4,7 +4,8 @@
 //! asserted — the trait promises none.
 
 use crate::channel::{
-    AttributableBroadcastChannel, BroadcastChannel, Channel, Connector, Listener,
+    AttributableBroadcastChannel, BroadcastChannel, Channel, Connector, Listener, RecvHalf,
+    SendHalf, SplitChannel,
 };
 use crate::error::{RecvError, SendError};
 
@@ -57,6 +58,46 @@ pub async fn too_large_is_recoverable<C: Channel>(mut a: C, mut b: C, max: usize
         .await
         .expect("channel survives TooLarge");
     assert_eq!(b.recv().await.unwrap(), b"still alive");
+}
+
+/// Two peers under MUTUAL load converge: each pushes a burst while draining
+/// the other, over links narrow enough that every send after the first waits
+/// on the peer. Driven through [`SplitChannel`], where the sending and
+/// receiving halves progress together — the same exchange through
+/// [`Channel`] alone deadlocks, because a task awaiting `send` is not
+/// polling `recv`.
+pub async fn mutual_bursts_converge<C: SplitChannel>(mut a: C, mut b: C, burst: usize) {
+    async fn drive<C: SplitChannel>(ch: &mut C, tag: u8, burst: usize) -> (usize, usize) {
+        let (mut tx, mut rx) = ch.split();
+        let sending = async move {
+            let mut sent = 0;
+            for i in 0..burst {
+                if tx.send(&[tag, i as u8]).await.is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            sent
+        };
+        let receiving = async move {
+            let mut got = 0;
+            while got < burst {
+                if rx.recv().await.is_err() {
+                    break;
+                }
+                got += 1;
+            }
+            got
+        };
+        futures_util::future::join(sending, receiving).await
+    }
+
+    let both = futures_util::future::join(drive(&mut a, b'a', burst), drive(&mut b, b'b', burst));
+    let (a_counts, b_counts) = tokio::time::timeout(std::time::Duration::from_secs(30), both)
+        .await
+        .expect("peers under mutual load must not wedge each other");
+    assert_eq!(a_counts, (burst, burst), "peer a must send and receive all");
+    assert_eq!(b_counts, (burst, burst), "peer b must send and receive all");
 }
 
 /// The connection-oriented lifecycle: connect, exchange a message, lose the
