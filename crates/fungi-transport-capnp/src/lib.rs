@@ -29,8 +29,9 @@
 //! blocking each other.
 //!
 //! The server end is provided by [`serve_loopback`] and [`serve_backend`] (a
-//! single [`Channel`] backend, from the Channel-only phase) and [`serve_plugin`]
-//! (an arbitrary [`Transport`] backend exposed as the whole capnp graph).
+//! single [`SplitChannel`] backend) and [`serve_plugin`] (a [`Transport`]
+//! whose connector and listener channels implement [`SplitChannel`], exposed
+//! as the whole capnp graph).
 //!
 //! The opening contract passes through unchanged: this layer only proxies a
 //! backend, so a channel's anonymity and authentication guarantees are
@@ -63,7 +64,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use fungi_transport::framed::DEFAULT_MAX_MSG_LEN;
 use fungi_transport::mem::MemAddr;
 use fungi_transport::{
-    Channel, ConnectError, Connector, ListenParams, Listener, RecvError, SendError, Transport,
+    Channel, ConnectError, Connector, ListenParams, Listener, RecvError, RecvHalf, SendError,
+    SendHalf, SplitChannel, Transport,
 };
 
 /// Generated code for `channel.capnp`.
@@ -1063,44 +1065,103 @@ impl CapnpChannel {
     }
 }
 
+/// The whole send path, shared by the unified channel and its sending half.
+fn send_over(
+    tx: mpsc::Sender<Command>,
+    channel_id: u64,
+    max_msg_len: usize,
+    msg: &[u8],
+) -> impl Future<Output = Result<(), SendError>> + Send + 'static {
+    // Reject an oversized message with the adapter's known limit before it
+    // ever reaches the actor: the check is local, so no RPC is made. Test the
+    // length FIRST, before copying — an oversized message is rejected without
+    // ever being allocated.
+    let too_large = (msg.len() > max_msg_len).then_some(max_msg_len);
+    // Copy only a within-bounds message into the returned `'static` future.
+    let msg = too_large.is_none().then(|| msg.to_vec());
+    async move {
+        let msg = match too_large {
+            Some(max) => return Err(SendError::TooLarge { max }),
+            None => msg.expect("a within-bounds message is always copied"),
+        };
+        let (reply, rx) = oneshot::channel();
+        tx.send(Command::Send {
+            channel_id,
+            msg,
+            reply,
+        })
+        .await
+        .map_err(|_| SendError::Closed)?;
+        rx.await.map_err(|_| SendError::Closed)?
+    }
+}
+
+/// The whole receive path, shared by the unified channel and its receiving
+/// half.
+async fn recv_over(tx: mpsc::Sender<Command>, channel_id: u64) -> Result<Vec<u8>, RecvError> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(Command::Recv { channel_id, reply })
+        .await
+        .map_err(|_| RecvError::Closed)?;
+    rx.await.map_err(|_| RecvError::Closed)?
+}
+
 impl Channel for CapnpChannel {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
-        // Reject an oversized message with the adapter's known limit before it
-        // ever reaches the actor: the check is local, so no RPC is made. Test
-        // the length FIRST, before copying — an oversized message is rejected
-        // without ever being allocated.
-        let too_large = (msg.len() > self.max_msg_len).then_some(self.max_msg_len);
-        let tx = self.tx.clone();
-        let channel_id = self.channel_id;
-        // Copy only a within-bounds message into the returned `'static` future.
-        let msg = too_large.is_none().then(|| msg.to_vec());
-        async move {
-            let msg = match too_large {
-                Some(max) => return Err(SendError::TooLarge { max }),
-                None => msg.expect("a within-bounds message is always copied"),
-            };
-            let (reply, rx) = oneshot::channel();
-            tx.send(Command::Send {
-                channel_id,
-                msg,
-                reply,
-            })
-            .await
-            .map_err(|_| SendError::Closed)?;
-            rx.await.map_err(|_| SendError::Closed)?
-        }
+        send_over(self.tx.clone(), self.channel_id, self.max_msg_len, msg)
     }
 
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
-        let tx = self.tx.clone();
-        let channel_id = self.channel_id;
-        async move {
-            let (reply, rx) = oneshot::channel();
-            tx.send(Command::Recv { channel_id, reply })
-                .await
-                .map_err(|_| RecvError::Closed)?;
-            rx.await.map_err(|_| RecvError::Closed)?
-        }
+        recv_over(self.tx.clone(), self.channel_id)
+    }
+}
+
+/// Sending half of a split [`CapnpChannel`]. Both halves address the same
+/// remote channel through the same actor queue: `send` and `recv` are
+/// independent RPC methods, so the wire was already full-duplex — only the
+/// Rust-side borrow kept them from being driven at once.
+#[derive(Debug)]
+pub struct CapnpSendHalf<'a> {
+    tx: &'a mpsc::Sender<Command>,
+    channel_id: u64,
+    max_msg_len: usize,
+}
+
+/// Receiving half of a split [`CapnpChannel`].
+#[derive(Debug)]
+pub struct CapnpRecvHalf<'a> {
+    tx: &'a mpsc::Sender<Command>,
+    channel_id: u64,
+}
+
+impl SendHalf for CapnpSendHalf<'_> {
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        send_over(self.tx.clone(), self.channel_id, self.max_msg_len, msg)
+    }
+}
+
+impl RecvHalf for CapnpRecvHalf<'_> {
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
+        recv_over(self.tx.clone(), self.channel_id)
+    }
+}
+
+impl SplitChannel for CapnpChannel {
+    type SendHalf<'a> = CapnpSendHalf<'a>;
+    type RecvHalf<'a> = CapnpRecvHalf<'a>;
+
+    fn split(&mut self) -> (CapnpSendHalf<'_>, CapnpRecvHalf<'_>) {
+        (
+            CapnpSendHalf {
+                tx: &self.tx,
+                channel_id: self.channel_id,
+                max_msg_len: self.max_msg_len,
+            },
+            CapnpRecvHalf {
+                tx: &self.tx,
+                channel_id: self.channel_id,
+            },
+        )
     }
 }
 
@@ -1174,44 +1235,67 @@ struct BackendServer {
 }
 
 /// Drive one backend channel: execute queued sends and buffer received
-/// messages — the single owner the traits' `&mut self` pair requires.
+/// messages concurrently through its borrowed halves.
 /// [`SendError::TooLarge`] is the one recoverable send error; any other
 /// send error, or any recv error, is the channel dying: the pump forwards
 /// it and exits, and later calls observe the closed queues as
 /// [`SendError::Closed`]/[`RecvError::Closed`].
-async fn pump_backend<C: Channel>(
+async fn pump_backend<C: SplitChannel>(
     mut channel: C,
     mut sends: mpsc::Receiver<QueuedSend>,
     received: mpsc::Sender<Result<Vec<u8>, RecvError>>,
 ) {
-    enum Event {
-        Send(Option<QueuedSend>),
-        In(Result<Vec<u8>, RecvError>),
-    }
-    loop {
-        // The select resolves to a plain value first, so both branch futures
-        // are dropped before the channel is used again; recv is cancel-safe
-        // by the Channel contract, so losing the race loses no message.
-        let event = tokio::select! {
-            cmd = sends.recv() => Event::Send(cmd),
-            got = channel.recv() => Event::In(got),
-        };
-        match event {
-            Event::Send(Some((msg, reply))) => {
-                let result = channel.send(&msg).await;
+    let (mut tx, mut rx) = channel.split();
+    let (stop_sending, mut stop) = oneshot::channel::<()>();
+    let sending = async move {
+        loop {
+            // A stop may cancel only this idle queue receive. Once a backend
+            // send starts, it is always driven to completion.
+            let queued = tokio::select! {
+                _ = &mut stop => return,
+                queued = sends.recv() => queued,
+            };
+            let Some((msg, reply)) = queued else {
+                return;
+            };
+            {
+                let result = tx.send(&msg).await;
                 let fatal = !matches!(result, Ok(()) | Err(SendError::TooLarge { .. }));
                 let _ = reply.send(result);
                 if fatal {
                     return;
                 }
             }
-            Event::Send(None) => return,
-            Event::In(got) => {
-                let fatal = got.is_err();
-                if received.send(got).await.is_err() || fatal {
-                    return;
-                }
+        }
+    };
+    let receiving = async move {
+        loop {
+            let got = rx.recv().await;
+            let fatal = got.is_err();
+            if received.send(got).await.is_err() || fatal {
+                return;
             }
+        }
+    };
+    let mut sending = std::pin::pin!(sending);
+    let mut receiving = std::pin::pin!(receiving);
+    enum Finished {
+        Sending,
+        Receiving,
+    }
+    let finished = tokio::select! {
+        () = &mut sending => Finished::Sending,
+        () = &mut receiving => Finished::Receiving,
+    };
+    match finished {
+        // Sending ended cleanly with its command queue, or on a fatal send.
+        // The receive future is cancel-safe and may be discarded.
+        Finished::Sending => {}
+        // Receiving ended first. Wake an idle sender, but never cancel an
+        // in-flight backend send: its future is not cancel-safe.
+        Finished::Receiving => {
+            let _ = stop_sending.send(());
+            sending.await;
         }
     }
 }
@@ -1258,7 +1342,7 @@ impl channel::Server for BackendServer {
 
 /// Wrap a freshly produced backend channel as a new capnp `Channel`
 /// capability, spawning its pump on the serving task's local set.
-fn new_channel_client<C: Channel + 'static>(channel: C) -> channel::Client {
+fn new_channel_client<C: SplitChannel + 'static>(channel: C) -> channel::Client {
     let (send_tx, sends) = mpsc::channel(8);
     let (received, recv_rx) = mpsc::channel(8);
     tokio::task::spawn_local(pump_backend(channel, sends, received));
@@ -1277,6 +1361,7 @@ struct ConnectorServer<Co: Connector> {
 impl<Co: Connector + 'static> connector::Server for ConnectorServer<Co>
 where
     Co::Addr: FromStr,
+    Co::Channel: SplitChannel + 'static,
 {
     fn connect(
         &mut self,
@@ -1307,7 +1392,10 @@ struct ListenerServer<L: Listener> {
     addr: String,
 }
 
-impl<L: Listener + 'static> listener::Server for ListenerServer<L> {
+impl<L: Listener + 'static> listener::Server for ListenerServer<L>
+where
+    L::Channel: SplitChannel + 'static,
+{
     fn accept(
         &mut self,
         _params: listener::AcceptParams,
@@ -1345,6 +1433,8 @@ struct TransportServer<T: Transport> {
 impl<T: Transport + 'static> transport::Server for TransportServer<T>
 where
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
 {
     fn connector(
         &mut self,
@@ -1473,6 +1563,8 @@ struct PluginServer<T: Transport, F> {
 impl<T: Transport + 'static, F: PluginFixtures + 'static> plugin::Server for PluginServer<T, F>
 where
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
 {
     fn transport(
         &mut self,
@@ -1543,19 +1635,20 @@ where
     })
 }
 
-/// Serve a channel over `io` backed by an arbitrary [`Channel`], so real
+/// Serve a channel over `io` backed by an arbitrary [`SplitChannel`], so real
 /// conformance can run through capnp-rpc. Each capnp `send`/`recv` is forwarded
 /// to `backend`. Pair with a [`CapnpChannel::connect`] on the other end of `io`.
 pub fn serve_backend<Io, C>(io: Io, backend: C) -> std::thread::JoinHandle<()>
 where
     Io: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    C: Channel + 'static,
+    C: SplitChannel + 'static,
 {
     serve(io, move || new_channel_client(backend).client)
 }
 
-/// Serve the whole transport graph over `reader`/`writer` backed by an
-/// arbitrary [`Transport`], exposing a `Plugin` bootstrap, and run until the
+/// Serve the whole transport graph over `reader`/`writer` backed by a
+/// [`Transport`] whose connector and listener channels implement
+/// [`SplitChannel`], exposing a `Plugin` bootstrap, and run until the
 /// connection closes. Its addresses must round-trip through capnp text
 /// ([`FromStr`] + [`Display`]).
 ///
@@ -1573,6 +1666,8 @@ where
     W: AsyncWrite + Unpin + 'static,
     T: Transport + 'static,
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
 {
     serve_plugin_with(backend, NoopFixtures, reader, writer).await
 }
@@ -1588,6 +1683,8 @@ where
     W: AsyncWrite + Unpin + 'static,
     T: Transport + 'static,
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
     F: PluginFixtures + 'static,
 {
     let network = twoparty::VatNetwork::new(
@@ -1615,6 +1712,8 @@ pub fn serve_plugin_stdio<T>(backend: T)
 where
     T: Transport + 'static,
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
 {
     serve_plugin_with_stdio(backend, NoopFixtures)
 }
@@ -1625,6 +1724,8 @@ pub fn serve_plugin_with_stdio<T, F>(backend: T, fixtures: F)
 where
     T: Transport + 'static,
     T::Addr: FromStr + Display,
+    <T::Connector as Connector>::Channel: SplitChannel + 'static,
+    <T::Listener as Listener>::Channel: SplitChannel + 'static,
     F: PluginFixtures + 'static,
 {
     let rt = tokio::runtime::Builder::new_current_thread()
