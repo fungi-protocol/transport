@@ -2,8 +2,10 @@
 //! full duplex, multiplexing, reconnect, and cancellation.
 
 use fungi_transport::RecvError;
-use fungi_transport::mem::{Delivery, MemAddr, MemConfig, duplex, network};
-use fungi_transport::{Channel, Connector, Listener, into_stream};
+use fungi_transport::mem::{Delivery, MemAddr, MemChannel, MemConfig, duplex, network};
+use fungi_transport::{
+    Channel, Connector, Listener, RecvHalf, SendHalf, SplitChannel, into_stream,
+};
 use futures_util::StreamExt;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -29,55 +31,38 @@ async fn scenario_1_ping_pong() {
 
 /// 2. Full duplex — both directions at once on ONE channel end.
 ///
-/// send and recv both take &mut self, so one end cannot do both
-/// concurrently. Workaround: a task owns the end; two mpsc queues expose
-/// the halves.
+/// `SplitChannel` borrows the two directions separately, so a blocked send
+/// never stops the receive that would release its peer.
 async fn scenario_2_full_duplex() {
-    let (a, mut b) = duplex(MemConfig {
-        capacity: Some(16),
+    async fn drive(ch: &mut MemChannel, tag: u8) -> Vec<Vec<u8>> {
+        let (mut tx, mut rx) = ch.split();
+        let sending = async move {
+            for i in 0u8..50 {
+                tx.send(&[tag, i]).await.unwrap();
+            }
+        };
+        let receiving = async move {
+            let mut messages = Vec::with_capacity(50);
+            for _ in 0..50 {
+                messages.push(rx.recv().await.unwrap());
+            }
+            messages
+        };
+        let ((), messages) = futures_util::future::join(sending, receiving).await;
+        messages
+    }
+
+    // With one slot per direction, each peer's second send waits until the
+    // other peer reads. Both peers must therefore keep receiving while they
+    // push their bursts.
+    let (mut a, mut b) = duplex(MemConfig {
+        capacity: Some(1),
         ..Default::default()
     });
-
-    // Peer B: plain echo loop in its own task.
-    tokio::spawn(async move {
-        while let Ok(msg) = b.recv().await {
-            if b.send(&msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Peer A: manual split — the channel lives in a pump task.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-    tokio::spawn(async move {
-        let mut a = a;
-        loop {
-            tokio::select! {
-                outgoing = out_rx.recv() => match outgoing {
-                    Some(msg) => { if a.send(&msg).await.is_err() { break } }
-                    None => break,
-                },
-                incoming = a.recv() => match incoming {
-                    Ok(msg) => { if in_tx.send(msg).await.is_err() { break } }
-                    Err(_) => break,
-                },
-            }
-        }
-    });
-
-    let sender = tokio::spawn(async move {
-        for i in 0u8..50 {
-            out_tx.send(vec![i]).await.unwrap();
-        }
-        out_tx
-    });
-    let mut echoed = 0;
-    while echoed < 50 {
-        in_rx.recv().await.unwrap();
-        echoed += 1;
-    }
-    drop(sender.await.unwrap());
+    let (from_b, from_a) =
+        futures_util::future::join(drive(&mut a, b'a'), drive(&mut b, b'b')).await;
+    assert!(from_b.iter().all(|msg| msg[0] == b'b'));
+    assert!(from_a.iter().all(|msg| msg[0] == b'a'));
     println!("scenario 2: ok");
 }
 

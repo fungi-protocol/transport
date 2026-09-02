@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::channel::{Channel, Connector, Listener};
+use crate::channel::{Channel, Connector, Listener, RecvHalf, SendHalf, SplitChannel};
 use crate::error::{ConnectError, RecvError, SendError};
 use crate::sender::SenderId;
 use crate::session::SessionId;
@@ -97,52 +97,111 @@ fn take_one(counter: &AtomicUsize) -> bool {
         .is_ok()
 }
 
+/// Reject an oversized payload before it is ever cloned.
+fn sized(cfg: &MemConfig, msg: &[u8]) -> Result<Vec<u8>, usize> {
+    match cfg.max_msg_len {
+        Some(max) if msg.len() > max => Err(max),
+        _ => Ok(msg.to_vec()),
+    }
+}
+
+/// The whole send path, shared by the unified channel and its sending half
+/// so the two can never drift: fault injection, latency, delivery mode and
+/// the internal timeout all live here.
+async fn send_path(
+    tx: &mpsc::Sender<Vec<u8>>,
+    cfg: &MemConfig,
+    drop_next: &AtomicUsize,
+    fail_next: &AtomicUsize,
+    msg: Result<Vec<u8>, usize>,
+) -> Result<(), SendError> {
+    let msg = match msg {
+        Ok(msg) => msg,
+        Err(max) => return Err(SendError::TooLarge { max }),
+    };
+    if take_one(fail_next) {
+        return Err(SendError::Transport("injected failure".into()));
+    }
+    if let Some(latency) = cfg.latency {
+        tokio::time::sleep(latency).await;
+    }
+    if take_one(drop_next) {
+        return Ok(()); // injected silent loss
+    }
+    match cfg.delivery {
+        Delivery::Confirmed => match cfg.send_timeout {
+            Some(deadline) => match tokio::time::timeout(deadline, tx.send(msg)).await {
+                Ok(sent) => sent.map_err(|_| SendError::Closed),
+                // Deliberately opaque — the trait has no Timeout variant;
+                // timing stays transport-internal.
+                Err(_) => Err(SendError::Transport("send timed out".into())),
+            },
+            None => tx.send(msg).await.map_err(|_| SendError::Closed),
+        },
+        Delivery::BestEffort => {
+            let _ = tx.try_send(msg); // full or closed: silent loss
+            Ok(())
+        }
+    }
+}
+
 impl Channel for MemChannel {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
-        // Check the size limit before copying: an oversized payload is
-        // rejected without ever being cloned.
-        let msg = match self.cfg.max_msg_len {
-            Some(max) if msg.len() > max => Err(max),
-            _ => Ok(msg.to_vec()),
-        };
-        async move {
-            let msg = match msg {
-                Ok(msg) => msg,
-                Err(max) => return Err(SendError::TooLarge { max }),
-            };
-            if take_one(&self.fail_next) {
-                return Err(SendError::Transport("injected failure".into()));
-            }
-            if let Some(latency) = self.cfg.latency {
-                tokio::time::sleep(latency).await;
-            }
-            if take_one(&self.drop_next) {
-                return Ok(()); // injected silent loss
-            }
-            match self.cfg.delivery {
-                Delivery::Confirmed => match self.cfg.send_timeout {
-                    Some(deadline) => {
-                        match tokio::time::timeout(deadline, self.tx.send(msg)).await {
-                            Ok(sent) => sent.map_err(|_| SendError::Closed),
-                            // Deliberately opaque — the trait has no Timeout
-                            // variant; timing stays transport-internal.
-                            Err(_) => Err(SendError::Transport("send timed out".into())),
-                        }
-                    }
-                    None => self.tx.send(msg).await.map_err(|_| SendError::Closed),
-                },
-                Delivery::BestEffort => {
-                    let _ = self.tx.try_send(msg); // full or closed: silent loss
-                    Ok(())
-                }
-            }
-        }
+        let msg = sized(&self.cfg, msg);
+        send_path(&self.tx, &self.cfg, &self.drop_next, &self.fail_next, msg)
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
         // tokio's mpsc recv is documented cancel-safe: no message is lost
         // when this future is dropped mid-wait.
         self.rx.recv().await.ok_or(RecvError::Closed)
+    }
+}
+
+/// Sending half of a split [`MemChannel`]: borrows everything the send path
+/// reads, so fault injection and limits behave exactly as on the whole
+/// channel.
+#[derive(Debug)]
+pub struct MemSendHalf<'a> {
+    tx: &'a mpsc::Sender<Vec<u8>>,
+    cfg: &'a MemConfig,
+    drop_next: &'a AtomicUsize,
+    fail_next: &'a AtomicUsize,
+}
+
+/// Receiving half of a split [`MemChannel`].
+#[derive(Debug)]
+pub struct MemRecvHalf<'a> {
+    rx: &'a mut mpsc::Receiver<Vec<u8>>,
+}
+
+impl SendHalf for MemSendHalf<'_> {
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        let msg = sized(self.cfg, msg);
+        send_path(self.tx, self.cfg, self.drop_next, self.fail_next, msg)
+    }
+}
+
+impl RecvHalf for MemRecvHalf<'_> {
+    async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
+        self.rx.recv().await.ok_or(RecvError::Closed)
+    }
+}
+
+impl SplitChannel for MemChannel {
+    type SendHalf<'a> = MemSendHalf<'a>;
+    type RecvHalf<'a> = MemRecvHalf<'a>;
+
+    fn split(&mut self) -> (MemSendHalf<'_>, MemRecvHalf<'_>) {
+        (
+            MemSendHalf {
+                tx: &self.tx,
+                cfg: &self.cfg,
+                drop_next: &self.drop_next,
+                fail_next: &self.fail_next,
+            },
+            MemRecvHalf { rx: &mut self.rx },
+        )
     }
 }
 

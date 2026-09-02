@@ -3,12 +3,14 @@
 //! [`Channel`] into one for consumers who prefer it.
 //!
 //! `&mut self` on both methods means one channel object cannot send and
-//! receive concurrently — full-duplex consumers must wrap the channel in a
-//! task (see `examples/echo.rs`, scenario 2). This is deliberate: one
-//! object with one fate keeps channel death unambiguous and the plugin
-//! surface a single interface. A consumer that wants split ends (a gossip
-//! node driving many channels) builds them locally with two tasks and a
-//! queue — the split is a consumer pattern, not a trait boundary.
+//! receive concurrently. This is deliberate: one object with one fate keeps
+//! channel death unambiguous and the plugin surface a single interface. It is
+//! not, however, something a consumer can work around on its own: two tasks
+//! cannot share one `&mut self` object, and sharing it through a lock makes a
+//! pending send starve the receiving side, so two peers under mutual load
+//! deadlock. Concurrent full-duplex is therefore a capability the channel
+//! must offer — [`SplitChannel`] — not a pattern the consumer can build (see
+//! `examples/echo.rs`, scenario 2).
 
 use std::future::Future;
 
@@ -67,6 +69,78 @@ pub trait Channel: Send {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
     /// Wait for and return the next message from the peer.
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
+}
+
+/// The sending direction of a [`SplitChannel`]. Same contract as
+/// [`Channel::send`], including that it is NOT cancel-safe.
+pub trait SendHalf: Send {
+    /// Send one opaque message to the peer.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;
+}
+
+/// The receiving direction of a [`SplitChannel`]. Same contract as
+/// [`Channel::recv`], cancel safety included.
+pub trait RecvHalf: Send {
+    /// Wait for and return the next message from the peer.
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send;
+}
+
+/// A [`Channel`] that hands out its two directions as separate borrows, for
+/// the consumer that must send and receive CONCURRENTLY.
+///
+/// Driving a channel through [`Channel`] alone cannot do that: one task
+/// awaiting `send` is not polling `recv`, so two peers that each have a
+/// send pending stop draining each other and deadlock. There is no fix
+/// outside the trait — two tasks cannot share one `&mut self` object, and a
+/// lock only moves the starvation onto the guard — so the channel itself
+/// has to offer the split.
+///
+/// The halves BORROW the channel, which keeps everything `&mut self` gave:
+/// only one split exists at a time, neither half outlives the object, and
+/// the two still share one fate — a channel that either direction kills is
+/// dead for both.
+///
+/// # Examples
+///
+/// The pattern a relay wants: two loops joined in one task, so a blocked
+/// send never stops the receiving that would release it.
+///
+/// ```
+/// use fungi_transport::{RecvHalf, SendHalf, SplitChannel};
+/// use fungi_transport::mem::{MemChannel, MemConfig, duplex};
+///
+/// async fn drive(ch: &mut MemChannel) {
+///     let (mut tx, mut rx) = ch.split();
+///     let sending = async move {
+///         for i in 0..4u8 { tx.send(&[i]).await.unwrap(); }
+///     };
+///     let receiving = async move {
+///         for _ in 0..4 { rx.recv().await.unwrap(); }
+///     };
+///     futures_util::future::join(sending, receiving).await;
+/// }
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// // One slot per direction: the second send blocks until the peer reads.
+/// let cfg = MemConfig { capacity: Some(1), ..MemConfig::default() };
+/// let (mut a, mut b) = duplex(cfg);
+/// // Both peers push and drain at once; neither wedges the other.
+/// futures_util::future::join(drive(&mut a), drive(&mut b)).await;
+/// # }
+/// ```
+pub trait SplitChannel: Channel {
+    /// The borrowed sending half.
+    type SendHalf<'a>: SendHalf
+    where
+        Self: 'a;
+    /// The borrowed receiving half.
+    type RecvHalf<'a>: RecvHalf
+    where
+        Self: 'a;
+
+    /// Borrow the two directions separately.
+    fn split(&mut self) -> (Self::SendHalf<'_>, Self::RecvHalf<'_>);
 }
 
 /// A P2P channel whose peer is AUTHENTICATED: every message on it is from the

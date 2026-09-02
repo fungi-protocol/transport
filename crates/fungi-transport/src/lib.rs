@@ -50,7 +50,7 @@ pub mod testkit;
 pub use addr::{OnionAddr, ParseOnionAddrError};
 pub use channel::{
     AttributableBroadcastChannel, AttributableChannel, BroadcastChannel, Channel, Connector,
-    ListenParams, Listener, Transport, into_stream,
+    ListenParams, Listener, RecvHalf, SendHalf, SplitChannel, Transport, into_stream,
 };
 pub use error::{BoxError, ConnectError, RecvError, SendError};
 pub use harness::{dial_sequence, echo_one_peer};
