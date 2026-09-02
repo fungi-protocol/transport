@@ -13,10 +13,11 @@
 //! channel itself: later sends and recvs return `Closed`.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use crate::channel::Channel;
+use crate::channel::{Channel, RecvHalf, SendHalf, SplitChannel};
 use crate::error::{RecvError, SendError};
 
 /// Default maximum message size (1 MiB).
@@ -28,23 +29,39 @@ pub const DEFAULT_MAX_MSG_LEN: usize = 1024 * 1024;
 /// in-process arti data stream — instead of each reimplementing framing.
 #[derive(Debug)]
 pub struct FramedChannel<S> {
-    stream: S,
+    writer: WriteHalf<S>,
+    reader: ReadHalf<S>,
     max_msg_len: usize,
-    // Partial-frame read state (cancel safety: lives here, not in futures).
+    read: ReadState,
+    // Set on protocol violation or a write error (torn frame); every later
+    // send and recv returns Closed. Shared rather than owned by one
+    // direction: either direction can poison, and both must see it — that
+    // is what keeps one object one fate once the halves are split apart.
+    poisoned: AtomicBool,
+}
+
+/// Partial-frame read state (cancel safety: lives in the channel, not in the
+/// `recv` future).
+#[derive(Debug, Default)]
+struct ReadState {
     header: [u8; 4],
     header_filled: usize,
     payload: Vec<u8>,
     payload_filled: usize,
-    // Set on protocol violation or a write error (torn frame); every later
-    // send and recv returns Closed.
-    poisoned: bool,
 }
 
-impl<S> FramedChannel<S> {
+impl<S> FramedChannel<S>
+where
+    S: AsyncRead + AsyncWrite,
+{
     /// Wrap `stream`. `max_msg_len` bounds both directions: larger sends
     /// fail with [`SendError::TooLarge`], larger incoming frames poison the
     /// channel (a peer announcing a huge frame must not induce the
     /// allocation).
+    ///
+    /// The stream is split into its two directions on the way in, so the
+    /// channel can hand them out separately later ([`SplitChannel`]) without
+    /// ever giving up single ownership of the stream.
     ///
     /// # Panics
     ///
@@ -54,14 +71,13 @@ impl<S> FramedChannel<S> {
             u32::try_from(max_msg_len).is_ok(),
             "max_msg_len must fit in the u32 length prefix"
         );
+        let (reader, writer) = tokio::io::split(stream);
         Self {
-            stream,
+            writer,
+            reader,
             max_msg_len,
-            header: [0; 4],
-            header_filled: 0,
-            payload: Vec::new(),
-            payload_filled: 0,
-            poisoned: false,
+            read: ReadState::default(),
+            poisoned: AtomicBool::new(false),
         }
     }
 }
@@ -86,90 +102,97 @@ fn map_recv_io(e: std::io::Error) -> RecvError {
     }
 }
 
-impl<S> FramedChannel<S>
+/// The whole write path, shared by the unified channel and its sending half
+/// so the two can never drift.
+async fn send_frame<W>(
+    writer: &mut W,
+    max_msg_len: usize,
+    poisoned: &AtomicBool,
+    msg: &[u8],
+) -> Result<(), SendError>
 where
-    S: AsyncRead + AsyncWrite + Send + Unpin,
+    W: AsyncWrite + Send + Unpin,
 {
-    async fn send_inner(&mut self, msg: &[u8]) -> Result<(), SendError> {
-        if self.poisoned {
-            return Err(SendError::Closed);
-        }
-        if msg.len() > self.max_msg_len {
-            return Err(SendError::TooLarge {
-                max: self.max_msg_len,
-            });
-        }
-        // Any io error may leave a torn frame on the wire; poison so no
-        // later send writes a fresh frame over bytes the peer would
-        // misparse. (`TooLarge` above never touches the stream — the one
-        // recoverable send error.)
-        let result: Result<(), std::io::Error> = async {
-            // max_msg_len fits in u32 (checked in new), so msg.len() does too.
-            let prefix = (msg.len() as u32).to_be_bytes();
-            self.stream.write_all(&prefix).await?;
-            self.stream.write_all(msg).await?;
-            self.stream.flush().await
-        }
-        .await;
-        result.map_err(|e| {
-            self.poisoned = true;
-            map_send_io(e)
-        })
+    if poisoned.load(Ordering::Relaxed) {
+        return Err(SendError::Closed);
     }
+    if msg.len() > max_msg_len {
+        return Err(SendError::TooLarge { max: max_msg_len });
+    }
+    // Any io error may leave a torn frame on the wire; poison so no later
+    // send writes a fresh frame over bytes the peer would misparse.
+    // (`TooLarge` above never touches the stream — the one recoverable send
+    // error.)
+    let result: Result<(), std::io::Error> = async {
+        // max_msg_len fits in u32 (checked in new), so msg.len() does too.
+        let prefix = (msg.len() as u32).to_be_bytes();
+        writer.write_all(&prefix).await?;
+        writer.write_all(msg).await?;
+        writer.flush().await
+    }
+    .await;
+    result.map_err(|e| {
+        poisoned.store(true, Ordering::Relaxed);
+        map_send_io(e)
+    })
+}
 
-    async fn recv_inner(&mut self) -> Result<Vec<u8>, RecvError> {
-        if self.poisoned {
-            return Err(RecvError::Closed);
-        }
-        while self.header_filled < 4 {
-            let n = self
-                .stream
-                .read(&mut self.header[self.header_filled..])
-                .await
-                .map_err(map_recv_io)?;
-            if n == 0 {
-                // EOF between frames is a clean close; inside one, a
-                // truncation.
-                if self.header_filled == 0 {
-                    return Err(RecvError::Closed);
-                }
-                self.poisoned = true;
-                return Err(RecvError::Transport("stream ended mid-frame".into()));
-            }
-            self.header_filled += n;
-        }
-        let len = u32::from_be_bytes(self.header) as usize;
-        if len > self.max_msg_len {
-            self.poisoned = true;
-            return Err(RecvError::Transport(
-                format!(
-                    "peer announced a {len}-byte frame, exceeding the {}-byte maximum",
-                    self.max_msg_len
-                )
-                .into(),
-            ));
-        }
-        // First entry for this frame: payload was taken (empty) after the
-        // previous one. On cancel-resume it is already sized.
-        if self.payload.len() != len {
-            self.payload.resize(len, 0);
-        }
-        while self.payload_filled < len {
-            let n = self
-                .stream
-                .read(&mut self.payload[self.payload_filled..])
-                .await
-                .map_err(map_recv_io)?;
-            if n == 0 {
-                self.poisoned = true;
-                return Err(RecvError::Transport("stream ended mid-frame".into()));
-            }
-            self.payload_filled += n;
-        }
-        self.header_filled = 0;
-        self.payload_filled = 0;
-        Ok(std::mem::take(&mut self.payload))
+/// The whole read path, shared by the unified channel and its receiving
+/// half. All partial-frame state is in `state`, never in this future.
+async fn recv_frame<R>(
+    reader: &mut R,
+    state: &mut ReadState,
+    max_msg_len: usize,
+    poisoned: &AtomicBool,
+) -> Result<Vec<u8>, RecvError>
+where
+    R: AsyncRead + Send + Unpin,
+{
+    if poisoned.load(Ordering::Relaxed) {
+        return Err(RecvError::Closed);
     }
+    while state.header_filled < 4 {
+        let n = reader
+            .read(&mut state.header[state.header_filled..])
+            .await
+            .map_err(map_recv_io)?;
+        if n == 0 {
+            // EOF between frames is a clean close; inside one, a truncation.
+            if state.header_filled == 0 {
+                return Err(RecvError::Closed);
+            }
+            poisoned.store(true, Ordering::Relaxed);
+            return Err(RecvError::Transport("stream ended mid-frame".into()));
+        }
+        state.header_filled += n;
+    }
+    let len = u32::from_be_bytes(state.header) as usize;
+    if len > max_msg_len {
+        poisoned.store(true, Ordering::Relaxed);
+        return Err(RecvError::Transport(
+            format!("peer announced a {len}-byte frame, exceeding the {max_msg_len}-byte maximum")
+                .into(),
+        ));
+    }
+    // First entry for this frame: payload was taken (empty) after the
+    // previous one. On cancel-resume it is already sized.
+    if state.payload.len() != len {
+        state.payload.resize(len, 0);
+    }
+    while state.payload_filled < len {
+        let n = reader
+            .read(&mut state.payload[state.payload_filled..])
+            .await
+            .map_err(map_recv_io)?;
+        if n == 0 {
+            poisoned.store(true, Ordering::Relaxed);
+            return Err(RecvError::Transport("stream ended mid-frame".into()));
+        }
+        state.payload_filled += n;
+    }
+    state.header_filled = 0;
+    state.payload_filled = 0;
+    Ok(std::mem::take(&mut state.payload))
 }
 
 impl<S> Channel for FramedChannel<S>
@@ -177,11 +200,82 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin,
 {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
-        self.send_inner(msg)
+        send_frame(&mut self.writer, self.max_msg_len, &self.poisoned, msg)
     }
 
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
-        self.recv_inner()
+        recv_frame(
+            &mut self.reader,
+            &mut self.read,
+            self.max_msg_len,
+            &self.poisoned,
+        )
+    }
+}
+
+/// Sending half of a split [`FramedChannel`].
+#[derive(Debug)]
+pub struct FramedSendHalf<'a, S> {
+    writer: &'a mut WriteHalf<S>,
+    max_msg_len: usize,
+    poisoned: &'a AtomicBool,
+}
+
+/// Receiving half of a split [`FramedChannel`], carrying the partial-frame
+/// state so a cancelled `recv` still resumes where it stopped.
+#[derive(Debug)]
+pub struct FramedRecvHalf<'a, S> {
+    reader: &'a mut ReadHalf<S>,
+    read: &'a mut ReadState,
+    max_msg_len: usize,
+    poisoned: &'a AtomicBool,
+}
+
+impl<S> SendHalf for FramedSendHalf<'_, S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        send_frame(self.writer, self.max_msg_len, self.poisoned, msg)
+    }
+}
+
+impl<S> RecvHalf for FramedRecvHalf<'_, S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
+        recv_frame(self.reader, self.read, self.max_msg_len, self.poisoned)
+    }
+}
+
+impl<S> SplitChannel for FramedChannel<S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    type SendHalf<'a>
+        = FramedSendHalf<'a, S>
+    where
+        Self: 'a;
+    type RecvHalf<'a>
+        = FramedRecvHalf<'a, S>
+    where
+        Self: 'a;
+
+    fn split(&mut self) -> (FramedSendHalf<'_, S>, FramedRecvHalf<'_, S>) {
+        (
+            FramedSendHalf {
+                writer: &mut self.writer,
+                max_msg_len: self.max_msg_len,
+                poisoned: &self.poisoned,
+            },
+            FramedRecvHalf {
+                reader: &mut self.reader,
+                read: &mut self.read,
+                max_msg_len: self.max_msg_len,
+                poisoned: &self.poisoned,
+            },
+        )
     }
 }
 
