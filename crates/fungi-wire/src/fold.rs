@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use crate::encoding::{EXT_VALIDITY, Encoding};
-use crate::message::Body;
+use crate::message::{Body, Message};
 use crate::set::MessageSet;
 
 /// A validity window, carried as extension record [`EXT_VALIDITY`]:
@@ -44,6 +44,20 @@ impl Validity {
     pub fn covers(&self, now: u64) -> bool {
         self.from <= now && now < self.until
     }
+}
+
+/// The validity window a message carries, if it carries one.
+///
+/// A decoded message's window is always well formed: a malformed value
+/// under the assigned type is refused at decode, so this cannot silently
+/// turn a broken record into "no window" and promote the message to
+/// permanently valid.
+fn window_of(msg: &Message) -> Option<Validity> {
+    msg.extensions
+        .records()
+        .iter()
+        .find(|r| r.ty == EXT_VALIDITY)
+        .and_then(|r| Validity::decode(&r.value))
 }
 
 /// A stand-in for application state: rich enough to be broken by a fold
@@ -79,13 +93,7 @@ pub fn fold_at<E: Encoding>(now: u64, set: &MessageSet) -> AppState {
     let mut state = AppState::default();
     for (_, bytes) in set.iter() {
         let Ok(msg) = E::decode(bytes) else { continue };
-        let window = msg
-            .extensions
-            .records()
-            .iter()
-            .find(|r| r.ty == EXT_VALIDITY)
-            .and_then(|r| Validity::decode(&r.value));
-        if window.is_some_and(|w| !w.covers(now)) {
+        if window_of(&msg).is_some_and(|w| !w.covers(now)) {
             continue;
         }
         let payload = msg.body.payload().to_vec();
@@ -108,33 +116,58 @@ mod tests {
     use proptest::prelude::*;
 
     /// A fold that is NOT a homomorphism, kept so the passing property is
-    /// known to have teeth: `min` is a join of the OPPOSITE order, so
-    /// combining folds disagrees with folding the combination.
-    fn broken_fold(set: &MessageSet) -> AppState {
+    /// known to have teeth.
+    ///
+    /// It differs from [`fold_at`] in exactly one respect — `min` where
+    /// the real fold uses `max`, a join of the OPPOSITE order — so what
+    /// the counterexample below demonstrates is the order of that join
+    /// and nothing else. A copy that also differed in which bodies it
+    /// accumulated would fail the law too, without saying which of the
+    /// two differences did it.
+    fn broken_fold(now: u64, set: &MessageSet) -> AppState {
         let mut state = AppState::default();
         for (_, bytes) in set.iter() {
             let Ok(msg) = HeaderTlv::decode(bytes) else {
                 continue;
             };
+            if window_of(&msg).is_some_and(|w| !w.covers(now)) {
+                continue;
+            }
             let payload = msg.body.payload().to_vec();
-            state.highest_confirmation = match state.highest_confirmation.take() {
-                Some(prev) => Some(prev.min(payload.clone())),
-                None => Some(payload.clone()),
-            };
+            if matches!(msg.body, Body::Confirmation(_)) {
+                state.highest_confirmation = match state.highest_confirmation.take() {
+                    Some(prev) => Some(prev.min(payload.clone())),
+                    None => Some(payload.clone()),
+                };
+            }
             state.payloads.insert(payload);
         }
         state
     }
 
+    /// Confirmations, so the field the broken fold mishandles is reached.
+    fn confirmations_of(payloads: &[&[u8]]) -> MessageSet {
+        let mut set = MessageSet::default();
+        for p in payloads {
+            let msg = Message::new(Body::Confirmation(p.to_vec()));
+            set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+        }
+        set
+    }
+
     #[test]
     fn the_broken_fold_fails_the_law_the_real_one_passes() {
-        let a = set_of(&[b"a"]);
-        let b = set_of(&[b"z"]);
-        let combined = broken_fold(&a.clone().join(b.clone()));
-        let joined = broken_fold(&a).join(broken_fold(&b));
+        let a = confirmations_of(&[b"a"]);
+        let b = confirmations_of(&[b"z"]);
         assert_ne!(
-            combined, joined,
+            broken_fold(0, &a.clone().join(b.clone())),
+            broken_fold(0, &a).join(broken_fold(0, &b)),
             "the counterexample must actually break, or it proves nothing"
+        );
+        assert_eq!(
+            fold_at::<HeaderTlv>(0, &a.clone().join(b.clone())),
+            fold_at::<HeaderTlv>(0, &a).join(fold_at::<HeaderTlv>(0, &b)),
+            "and the real fold must survive the input that breaks it"
         );
     }
 
@@ -177,18 +210,152 @@ mod tests {
 
     mod properties {
         use super::*;
-        use crate::set::tests::properties::any_message_set;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        /// A clock and two sets whose messages carry validity windows
+        /// positioned against that clock, drawn together so windows that
+        /// cover it, windows that closed before it and windows that have
+        /// not opened all occur.
+        ///
+        /// Local to this module by necessity. The shared message
+        /// generator's extension types are all odd and far above every
+        /// reserved range, because the encoding suite compares three
+        /// candidates over one domain and the uniform shape reserves
+        /// record type 2 — which is exactly `EXT_VALIDITY`. Widening the
+        /// shared generator to emit windows would make its messages
+        /// unencodable by one of the candidates. The homomorphism is
+        /// stated over a single encoding, so it can carry records the
+        /// shared domain cannot.
+        fn clocked_sets() -> impl Strategy<Value = (u64, MessageSet, MessageSet)> {
+            // `u64::MAX` is left out of the clock: covering it needs
+            // `now < until` and following it needs `from > now`, so two
+            // of the three positions are unreachable at that one value.
+            (0u64..u64::MAX).prop_flat_map(|now| (Just(now), any_set_at(now), any_set_at(now)))
+        }
+
+        fn any_set_at(now: u64) -> impl Strategy<Value = MessageSet> {
+            proptest::collection::vec(any_message_at(now), 0..6).prop_map(|msgs| {
+                let mut set = MessageSet::default();
+                for msg in msgs {
+                    set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+                }
+                set
+            })
+        }
+
+        /// A message that carries a window against `now` about half the
+        /// time, and none the rest.
+        fn any_message_at(now: u64) -> impl Strategy<Value = Message> {
+            (
+                crate::testing::any_encodable_message(),
+                proptest::option::of((0u8..3u8, any::<u64>(), any::<u64>())),
+            )
+                .prop_map(move |(msg, window)| match window {
+                    None => msg,
+                    Some((position, a, b)) => with_window(msg, window_for(now, position, a, b)),
+                })
+        }
+
+        /// A window placed relative to `now`: covering it, closed before
+        /// it, or not yet open. Saturating throughout, so every draw
+        /// yields `from <= until` and the intended position holds for
+        /// every clock the strategy above can produce.
+        fn window_for(now: u64, position: u8, a: u64, b: u64) -> Validity {
+            match position {
+                0 => Validity {
+                    from: now.saturating_sub(a),
+                    until: (now + 1).saturating_add(b),
+                },
+                1 => {
+                    let until = now.saturating_sub(a);
+                    Validity {
+                        from: until.saturating_sub(b),
+                        until,
+                    }
+                }
+                _ => {
+                    let from = (now + 1).saturating_add(a);
+                    Validity {
+                        from,
+                        until: from.saturating_add(b),
+                    }
+                }
+            }
+        }
+
+        /// Prepend the window as record [`EXT_VALIDITY`]. Type 2 sorts
+        /// below every type the shared generator emits, so the stream
+        /// stays canonical without re-sorting.
+        fn with_window(msg: Message, window: Validity) -> Message {
+            let mut value = window.from.to_be_bytes().to_vec();
+            value.extend_from_slice(&window.until.to_be_bytes());
+            let mut records = vec![TlvRecord {
+                ty: EXT_VALIDITY,
+                value,
+            }];
+            records.extend(msg.extensions.into_records());
+            Message {
+                body: msg.body,
+                extensions: TlvStream::new(records).expect("type 2 sorts below the rest"),
+            }
+        }
+
+        /// The guard against a silently vacuous property: the laws below
+        /// only say anything about validity if the sets they draw carry
+        /// windows, and only exercise the skip branch if some of those
+        /// windows exclude the clock. Counted over draws from the very
+        /// strategy the properties use, because the failure this catches
+        /// is a generator that does not reach the branch its property
+        /// claims to cover.
+        #[test]
+        fn the_homomorphism_properties_are_not_vacuous() {
+            let strategy = clocked_sets();
+            let mut runner = TestRunner::deterministic();
+            let (mut messages, mut covering, mut closed, mut unopened) = (0u32, 0u32, 0u32, 0u32);
+            for _ in 0..256 {
+                let (now, a, b) = strategy
+                    .new_tree(&mut runner)
+                    .expect("the strategy filters nothing out")
+                    .current();
+                for set in [&a, &b] {
+                    for (_, bytes) in set.iter() {
+                        messages += 1;
+                        let msg = HeaderTlv::decode(bytes).expect("generated messages decode");
+                        let Some(window) = window_of(&msg) else {
+                            continue;
+                        };
+                        if window.covers(now) {
+                            covering += 1;
+                        } else if window.until <= now {
+                            closed += 1;
+                        } else {
+                            unopened += 1;
+                        }
+                    }
+                }
+            }
+            let windowed = covering + closed + unopened;
+            assert!(
+                windowed * 4 > messages,
+                "only {windowed}/{messages} generated messages carry a validity window"
+            );
+            assert!(
+                covering > 64 && closed > 64 && unopened > 64,
+                "window positions relative to the clock: {covering} covering, \
+                 {closed} closed, {unopened} not yet open"
+            );
+        }
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(128))]
 
-            /// The homomorphism, at a fixed instant.
+            /// The homomorphism, at a fixed instant. The clock is drawn
+            /// with the sets rather than beside them: a window is only a
+            /// test of the skip branch if it is positioned against the
+            /// instant the fold is taken at.
             #[test]
-            fn fold_commutes_with_union(
-                now in any::<u64>(),
-                a in any_message_set(),
-                b in any_message_set(),
-            ) {
+            fn fold_commutes_with_union((now, a, b) in clocked_sets()) {
                 prop_assert_eq!(
                     fold_at::<HeaderTlv>(now, &a.clone().join(b.clone())),
                     fold_at::<HeaderTlv>(now, &a).join(fold_at::<HeaderTlv>(now, &b)),
@@ -197,10 +364,7 @@ mod tests {
 
             /// Merging a set into itself is a no-op at the state level too.
             #[test]
-            fn folding_is_idempotent_under_merge(
-                now in any::<u64>(),
-                a in any_message_set(),
-            ) {
+            fn folding_is_idempotent_under_merge((now, a, _b) in clocked_sets()) {
                 prop_assert_eq!(
                     fold_at::<HeaderTlv>(now, &a.clone().join(a.clone())),
                     fold_at::<HeaderTlv>(now, &a),

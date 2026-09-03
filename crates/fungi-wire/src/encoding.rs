@@ -8,6 +8,7 @@
 
 use crate::bigsize;
 use crate::error::{DecodeError, EncodeError};
+use crate::fold::Validity;
 use crate::message::{Body, Message};
 use crate::tlv::TlvStream;
 
@@ -21,13 +22,34 @@ pub(crate) fn known_extension_type(ty: u64) -> bool {
     ty == EXT_VALIDITY
 }
 
-/// The odd/even rule for extension records: an unknown odd record is
-/// carried along, an unknown even record is refused. A node that silently
-/// dropped either would re-encode a different message.
-pub(crate) fn reject_unknown_even(extensions: &TlvStream) -> Result<(), DecodeError> {
+/// The two rules an extension stream must satisfy at the message layer.
+///
+/// The odd/even rule on TYPES: an unknown odd record is carried along, an
+/// unknown even record is refused. A node that silently dropped either
+/// would re-encode a different message.
+///
+/// And, for a known even type, its value must parse. Nothing about the
+/// odd/even scheme itself can enforce that — the envelope sees a type and
+/// an opaque byte string, so a value rule needs a per-type schema, which
+/// only a build that knows the type has. Accepting a value it cannot read
+/// would put back exactly the divergence the even bit exists to prevent,
+/// one level down; for a validity window it would also be the worst
+/// available reading, since a window that is dropped rather than refused
+/// makes the message unconditionally valid forever.
+pub(crate) fn validate_extensions(extensions: &TlvStream) -> Result<(), DecodeError> {
     for rec in extensions.records() {
         if rec.ty % 2 == 0 && !known_extension_type(rec.ty) {
             return Err(DecodeError::UnknownEvenExtension { ty: rec.ty });
+        }
+        if rec.ty == EXT_VALIDITY {
+            let bad = DecodeError::BadExtensionValue { ty: rec.ty };
+            let window = Validity::decode(&rec.value).ok_or(bad.clone())?;
+            // An inverted window covers no instant at all, so it can only
+            // be a mistake or a probe; two builds that each guessed at
+            // what it meant would not have to guess the same way.
+            if window.from > window.until {
+                return Err(bad);
+            }
         }
     }
     Ok(())
@@ -63,7 +85,10 @@ impl Encoding for HeaderTlv {
 
     fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError> {
         let payload = msg.body.payload();
-        let mut out = Vec::with_capacity(payload.len() + 16);
+        // No shape pre-sizes its buffer. Giving one a head start would
+        // charge the others for an implementation choice rather than for
+        // the format, which is the comparison this crate exists to make.
+        let mut out = Vec::new();
         out.extend_from_slice(&msg.body.wire_type().to_be_bytes());
         bigsize::encode(payload.len() as u64, &mut out);
         out.extend_from_slice(payload);
@@ -85,7 +110,7 @@ impl Encoding for HeaderTlv {
         let payload = rest.get(..len).ok_or(DecodeError::UnexpectedEof)?.to_vec();
         let body = Body::from_wire_type(ty, payload)?;
         let extensions = TlvStream::decode(&rest[len..])?;
-        reject_unknown_even(&extensions)?;
+        validate_extensions(&extensions)?;
         Ok(Message { body, extensions })
     }
 }
@@ -103,6 +128,9 @@ pub enum AllTlv {}
 const KIND_RECORD: u64 = 1;
 /// Record type carrying the payload.
 const PAYLOAD_RECORD: u64 = 2;
+/// Width of the kind record's value: the wire type is a big-endian u16.
+/// Equal to [`PAYLOAD_RECORD`] by coincidence and not by meaning.
+const KIND_VALUE_LEN: u64 = 2;
 
 impl Encoding for AllTlv {
     const NAME: &'static str = "all-tlv";
@@ -118,7 +146,7 @@ impl Encoding for AllTlv {
         }
         let mut out = Vec::new();
         bigsize::encode(KIND_RECORD, &mut out);
-        bigsize::encode(2, &mut out);
+        bigsize::encode(KIND_VALUE_LEN, &mut out);
         out.extend_from_slice(&msg.body.wire_type().to_be_bytes());
         let payload = msg.body.payload();
         bigsize::encode(PAYLOAD_RECORD, &mut out);
@@ -150,7 +178,7 @@ impl Encoding for AllTlv {
             .try_into()
             .map_err(|_| DecodeError::BadBody)?;
         let body = Body::from_wire_type(u16::from_be_bytes(ty), payload.value)?;
-        reject_unknown_even(&extensions)?;
+        validate_extensions(&extensions)?;
         Ok(Message { body, extensions })
     }
 }
@@ -236,7 +264,7 @@ impl Encoding for KvPairs {
         let body =
             Body::from_wire_type(u16::from_be_bytes(ty), payload.ok_or(DecodeError::BadBody)?)?;
         let extensions = TlvStream::new(records)?;
-        reject_unknown_even(&extensions)?;
+        validate_extensions(&extensions)?;
         Ok(Message { body, extensions })
     }
 }
@@ -469,6 +497,64 @@ pub(crate) mod suite {
             AllTlv::encode(&msg),
             Err(EncodeError::ReservedExtensionType { ty: 1 })
         );
+    }
+
+    /// A validity record whose value is not a window is refused, not
+    /// ignored.
+    ///
+    /// Run over the two shapes that can carry `EXT_VALIDITY` at all; the
+    /// uniform shape reserves that record type, so there is no such
+    /// message for it to decode.
+    fn a_malformed_validity_record_is_refused<E: crate::encoding::Encoding>() {
+        use crate::encoding::EXT_VALIDITY;
+        use crate::error::DecodeError;
+        use crate::message::{Body, Message};
+        use crate::tlv::{TlvRecord, TlvStream};
+
+        let mut inverted = 5u64.to_be_bytes().to_vec();
+        inverted.extend_from_slice(&1u64.to_be_bytes());
+        let mut well_formed = 1u64.to_be_bytes().to_vec();
+        well_formed.extend_from_slice(&5u64.to_be_bytes());
+
+        // Encoding does not police values — only decoding does — so these
+        // bytes are exactly what a peer sending them would put on the
+        // wire.
+        for value in [Vec::new(), vec![0u8; 3], vec![0u8; 17], inverted] {
+            let msg = Message {
+                body: Body::Psbt(b"x".to_vec()),
+                extensions: TlvStream::new(vec![TlvRecord {
+                    ty: EXT_VALIDITY,
+                    value,
+                }])
+                .expect("canonical"),
+            };
+            let bytes = E::encode(&msg).expect("the shape can carry the record");
+            assert_eq!(
+                E::decode(&bytes),
+                Err(DecodeError::BadExtensionValue { ty: EXT_VALIDITY }),
+                "{}",
+                E::NAME
+            );
+        }
+
+        let msg = Message {
+            body: Body::Psbt(b"x".to_vec()),
+            extensions: TlvStream::new(vec![TlvRecord {
+                ty: EXT_VALIDITY,
+                value: well_formed,
+            }])
+            .expect("canonical"),
+        };
+        let bytes = E::encode(&msg).expect("the shape can carry the record");
+        assert_eq!(E::decode(&bytes), Ok(msg), "{}", E::NAME);
+    }
+
+    #[test]
+    fn malformed_validity_records_are_refused_by_every_shape_that_carries_them() {
+        use crate::encoding::{HeaderTlv, KvPairs};
+
+        a_malformed_validity_record_is_refused::<HeaderTlv>();
+        a_malformed_validity_record_is_refused::<KvPairs>();
     }
 
     /// The sharper consequence: `EXT_VALIDITY` is 2, exactly the record

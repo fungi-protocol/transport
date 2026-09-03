@@ -184,8 +184,25 @@ mod tests {
     // and the n1-only row 0x00 00 ("unknown even field for n1's
     // namespace" — even only because n1 leaves type 0 undefined; n2
     // defines it). All five parse fine here and are refused one layer
-    // up, where the odd/even rule lives; encoding.rs (not yet written)
-    // asserts them.
+    // up, where the odd/even rule lives; `unknown_even_vectors_are_
+    // refused_at_the_message_layer` below carries each of them through a
+    // message and asserts exactly that.
+
+    /// (name, hex, type) — Appendix B's "unknown even type" decoding
+    /// failures, which this crate refuses at the message layer rather
+    /// than in the stream codec. Carried as the extension suffix of a
+    /// message so the layer that owns the rule is the one under test.
+    const TLV_UNKNOWN_EVEN: &[(&str, &str, u64)] = &[
+        ("unknown even type 18", "12 00", 18),
+        ("unknown even type 258", "fd0102 00", 258),
+        ("unknown even type 16777218", "fe01000002 00", 16_777_218),
+        (
+            "unknown even type 72057594037927938",
+            "ff0100000000000002 00",
+            72_057_594_037_927_938,
+        ),
+        ("unknown even type 0 (n1 namespace)", "00 00", 0),
+    ];
     //
     // not a concrete vector: Appendix B's "TLV Stream Decoding Failure"
     // section also states two general properties rather than giving
@@ -233,6 +250,27 @@ mod tests {
             let mut out = Vec::new();
             stream.encode(&mut out);
             assert_eq!(out, bytes, "{name} must re-encode verbatim");
+        }
+    }
+
+    #[test]
+    fn unknown_even_vectors_are_refused_at_the_message_layer() {
+        use crate::encoding::{Encoding, HeaderTlv};
+
+        for (name, hex_str, ty) in TLV_UNKNOWN_EVEN {
+            let stream = fixture(hex_str);
+            // The stream codec accepts these: the odd/even rule is not
+            // its rule.
+            assert!(TlvStream::decode(&stream).is_ok(), "{name}");
+            // Message type 1, zero-length payload, then the vector as the
+            // extension suffix.
+            let mut bytes = vec![0x00, 0x01, 0x00];
+            bytes.extend_from_slice(&stream);
+            assert_eq!(
+                HeaderTlv::decode(&bytes),
+                Err(DecodeError::UnknownEvenExtension { ty: *ty }),
+                "{name}"
+            );
         }
     }
 

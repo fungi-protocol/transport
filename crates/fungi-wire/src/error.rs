@@ -37,6 +37,19 @@ pub enum DecodeError {
         /// The message type.
         ty: u16,
     },
+    /// An extension record of a type this build DOES understand carried
+    /// a value that does not parse under that type's schema.
+    ///
+    /// Refused rather than ignored. The even bit exists so that two
+    /// nodes cannot diverge over a record one of them cannot handle;
+    /// accepting a record whose value is unreadable reinstates that
+    /// divergence one level down, and for a validity window it does so
+    /// in the worst direction — an ignored window is an unconditionally
+    /// valid message.
+    BadExtensionValue {
+        /// The record type whose value failed.
+        ty: u64,
+    },
     /// The body's own fields were malformed.
     BadBody,
 }
@@ -67,6 +80,9 @@ impl fmt::Display for DecodeError {
             }
             DecodeError::UnknownRequiredMessageType { ty } => {
                 write!(f, "unknown message type {ty}, not safe to ignore")
+            }
+            DecodeError::BadExtensionValue { ty } => {
+                write!(f, "malformed value in extension record of type {ty}")
             }
             DecodeError::BadBody => f.write_str("malformed message body"),
         }
@@ -99,6 +115,10 @@ mod tests {
         assert_eq!(
             DecodeError::UnknownEvenExtension { ty: 4 }.to_string(),
             "unknown extension record of even type 4"
+        );
+        assert_eq!(
+            DecodeError::BadExtensionValue { ty: 2 }.to_string(),
+            "malformed value in extension record of type 2"
         );
         assert_eq!(
             EncodeError::ReservedExtensionType { ty: 1 }.to_string(),

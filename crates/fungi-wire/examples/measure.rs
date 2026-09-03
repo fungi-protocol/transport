@@ -10,7 +10,7 @@
 //!   cargo run --manifest-path crates/fungi-wire/Cargo.toml --example measure
 
 use fungi_wire::encoding::{AllTlv, Encoding, HeaderTlv, KvPairs, wrap};
-use fungi_wire::{Body, Message};
+use fungi_wire::{Body, EXT_VALIDITY, EncodeError, Message, TlvRecord, TlvStream};
 
 fn sizes(msg: &Message) -> (usize, usize, usize) {
     // Every message this example builds is representable in all three
@@ -56,6 +56,43 @@ fn row(name: &str, msg: &Message) {
     );
 }
 
+/// The same message carrying one validity window.
+///
+/// Every row above is extension-free, so it measures the envelope and not
+/// the extension mechanism — which is the thing the "where does TLV
+/// belong" question is actually about.
+fn with_validity(body: Body) -> Message {
+    let mut value = 0u64.to_be_bytes().to_vec();
+    value.extend_from_slice(&u64::MAX.to_be_bytes());
+    Message {
+        body,
+        extensions: TlvStream::new(vec![TlvRecord {
+            ty: EXT_VALIDITY,
+            value,
+        }])
+        .expect("one record is a canonical stream"),
+    }
+}
+
+/// A row for a message a shape may be unable to represent at all.
+///
+/// `sizes` above insists on all three, which is right for the rows it
+/// serves and is exactly why it cannot measure this one: the uniform
+/// shape reserves the record type the protocol's only assigned extension
+/// uses, so for it there is no encoding to report rather than a defect to
+/// be loud about.
+fn ext_row(name: &str, msg: &Message) {
+    let payload = msg.body.payload().len();
+    let cell = |encoded: Result<Vec<u8>, EncodeError>| match encoded {
+        Ok(bytes) => (bytes.len().to_string(), (bytes.len() - payload).to_string()),
+        Err(_) => ("n/a".to_string(), "-".to_string()),
+    };
+    let (h, ho) = cell(HeaderTlv::encode(msg));
+    let (a, ao) = cell(AllTlv::encode(msg));
+    let (k, ko) = cell(KvPairs::encode(msg));
+    println!("{name:<34} {payload:>8} {h:>10} {a:>10} {k:>10}   {ho:>6} {ao:>6} {ko:>6}");
+}
+
 fn main() {
     println!(
         "{:<34} {:>8} {:>10} {:>10} {:>10}   {:>6} {:>6} {:>6}",
@@ -98,6 +135,20 @@ fn main() {
     row(
         "co-spend proposal",
         &Message::new(Body::Psbt(vec![0u8; 65536])),
+    );
+
+    println!("\n-- carrying one extension record: what the mechanism costs --");
+    ext_row(
+        "payment + validity window",
+        &with_validity(Body::Payment(vec![0u8; 32])),
+    );
+    ext_row(
+        "listen advertisement + validity",
+        &with_validity(Body::ListenAdvertisement(vec![0u8; 256])),
+    );
+    println!(
+        "  all-tlv is n/a because it reserves record type {EXT_VALIDITY}, which is\n  \
+         the extension type these rows carry."
     );
 
     println!("\n-- nesting: what a Byzantine layer costs --");
