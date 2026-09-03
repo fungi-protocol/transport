@@ -6,23 +6,39 @@
 //! depends on the set and not on the order the messages arrived in.
 
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
 
-use crate::id::{SET_COMMITMENT_TAG, tagged_hash};
+use crate::id::{SET_COMMITMENT_TAG, tagged_hash_iter};
 use crate::{MessageId, message_id};
 
 /// The set of messages a node has delivered, keyed by identity.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MessageSet(BTreeMap<MessageId, Vec<u8>>);
 
+/// A full message ID was observed with two different byte strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityCollision {
+    /// Conflicting full identity.
+    pub id: MessageId,
+}
+
+impl fmt::Display for IdentityCollision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "different messages share full identity {:02x?}", self.id)
+    }
+}
+
+impl Error for IdentityCollision {}
+
 impl MessageSet {
     /// Record a message, returning its identity. Inserting the same bytes
-    /// again is a no-op: this keeps the incumbent while merging keeps the
-    /// newcomer, and the two agree anyway because identity is a hash of
-    /// the bytes, so the incumbent and the newcomer are the same bytes.
-    pub fn insert(&mut self, bytes: Vec<u8>) -> MessageId {
+    /// again is a no-op; different bytes under the same full ID are an
+    /// explicit collision instead of an order-dependent overwrite.
+    pub fn insert(&mut self, bytes: Vec<u8>) -> Result<MessageId, IdentityCollision> {
         let id = message_id(&bytes);
-        self.0.entry(id).or_insert(bytes);
-        id
+        self.insert_at(id, bytes)?;
+        Ok(id)
     }
 
     /// How many distinct messages the set holds.
@@ -40,18 +56,24 @@ impl MessageSet {
         self.0.iter().map(|(id, bytes)| (id, bytes.as_slice()))
     }
 
-    /// Join `other` into this grow-only set.
-    pub fn merge(&mut self, other: Self) {
+    /// Join `other` into this grow-only set, detecting full-ID collisions.
+    pub fn merge(&mut self, other: Self) -> Result<(), IdentityCollision> {
+        for (id, bytes) in &other.0 {
+            if self.0.get(id).is_some_and(|existing| existing != bytes) {
+                return Err(IdentityCollision { id: *id });
+            }
+        }
         self.0.extend(other.0);
+        Ok(())
     }
 
     /// Return the union of two grow-only message sets.
     ///
     /// Union is associative, commutative and idempotent, so peers may merge
     /// snapshots in any order and repeat merges without changing the result.
-    pub fn union(mut self, other: Self) -> Self {
-        self.merge(other);
-        self
+    pub fn union(mut self, other: Self) -> Result<Self, IdentityCollision> {
+        self.merge(other)?;
+        Ok(self)
     }
 
     /// A commitment to exactly this set.
@@ -65,16 +87,31 @@ impl MessageSet {
     /// resting on the ids' width alone, which a later variable-width
     /// component would silently take away.
     pub fn commitment(&self) -> [u8; 32] {
-        let count = (self.0.len() as u64).to_be_bytes();
-        let ids: Vec<u8> = self.0.keys().flatten().copied().collect();
-        tagged_hash(SET_COMMITMENT_TAG, &[&count, &ids])
+        let count = u64::try_from(self.0.len())
+            .expect("a materialized MessageSet cannot exceed u64::MAX entries")
+            .to_be_bytes();
+        let parts =
+            std::iter::once(count.as_slice()).chain(self.0.keys().map(<[u8; 32]>::as_slice));
+        tagged_hash_iter(SET_COMMITMENT_TAG, parts)
+    }
+
+    fn insert_at(&mut self, id: MessageId, bytes: Vec<u8>) -> Result<(), IdentityCollision> {
+        match self.0.get(&id) {
+            Some(existing) if existing != &bytes => Err(IdentityCollision { id }),
+            Some(_) => Ok(()),
+            None => {
+                self.0.insert(id, bytes);
+                Ok(())
+            }
+        }
     }
 }
 
 #[cfg(test)]
 impl crate::testing::Join for MessageSet {
     fn join(mut self, other: Self) -> Self {
-        self.merge(other);
+        self.merge(other)
+            .expect("SHA-256 collision resistance is a test assumption");
         self
     }
 }
@@ -91,7 +128,8 @@ pub(crate) mod tests {
         let mut set = MessageSet::default();
         for p in payloads {
             let msg = Message::new(Body::Psbt(p.to_vec()));
-            set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+            set.insert(HeaderTlv::encode(&msg).expect("encodable"))
+                .unwrap();
         }
         set
     }
@@ -100,8 +138,12 @@ pub(crate) mod tests {
     fn inserting_the_same_message_twice_changes_nothing() {
         let mut set = MessageSet::default();
         let msg = Message::new(Body::Psbt(b"x".to_vec()));
-        let a = set.insert(HeaderTlv::encode(&msg).expect("encodable"));
-        let b = set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+        let a = set
+            .insert(HeaderTlv::encode(&msg).expect("encodable"))
+            .unwrap();
+        let b = set
+            .insert(HeaderTlv::encode(&msg).expect("encodable"))
+            .unwrap();
         assert_eq!(a, b);
         assert_eq!(set.len(), 1);
     }
@@ -112,10 +154,42 @@ pub(crate) mod tests {
         let b = set_of(&[b"b", b"c"]);
         let expected = set_of(&[b"a", b"b", b"c"]);
 
-        assert_eq!(a.clone().union(b.clone()), expected);
+        assert_eq!(a.clone().union(b.clone()), Ok(expected.clone()));
         let mut merged = a;
-        merged.merge(b);
+        merged.merge(b).unwrap();
         assert_eq!(merged, expected);
+    }
+
+    #[test]
+    fn a_full_id_collision_is_never_resolved_by_arrival_order() {
+        let id = [7; 32];
+        let mut set = MessageSet::default();
+        set.insert_at(id, b"first".to_vec()).unwrap();
+        assert_eq!(
+            set.insert_at(id, b"second".to_vec()),
+            Err(IdentityCollision { id })
+        );
+        assert_eq!(set.iter().next(), Some((&id, b"first".as_slice())));
+    }
+
+    #[test]
+    fn merge_is_atomic_when_an_identity_collision_is_detected() {
+        let collision_id = [7; 32];
+        let mut left = MessageSet::default();
+        left.insert_at(collision_id, b"incumbent".to_vec()).unwrap();
+        let before = left.clone();
+
+        let mut right = MessageSet::default();
+        right.insert(b"accepted".to_vec()).unwrap();
+        right
+            .insert_at(collision_id, b"conflicting".to_vec())
+            .unwrap();
+
+        assert_eq!(
+            left.merge(right),
+            Err(IdentityCollision { id: collision_id })
+        );
+        assert_eq!(left, before);
     }
 
     #[test]
@@ -149,7 +223,8 @@ pub(crate) mod tests {
                 |msgs| {
                     let mut set = MessageSet::default();
                     for msg in msgs {
-                        set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+                        set.insert(HeaderTlv::encode(&msg).expect("encodable"))
+                            .unwrap();
                     }
                     set
                 },

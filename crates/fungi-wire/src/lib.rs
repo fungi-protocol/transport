@@ -45,5 +45,5 @@ pub use message::{
     Body, Message, TYPE_BLOCK, TYPE_CONFIRMATION, TYPE_LISTEN_ADVERTISEMENT, TYPE_PAYMENT,
     TYPE_PSBT, TYPE_VALIDITY_PROOF, UnknownBody,
 };
-pub use set::MessageSet;
+pub use set::{IdentityCollision, MessageSet};
 pub use tlv::{TlvRecord, TlvStream};

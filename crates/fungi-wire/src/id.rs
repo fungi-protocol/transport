@@ -37,6 +37,13 @@ pub fn message_id(bytes: &[u8]) -> MessageId {
 /// unambiguous. The count it commits first is a hedge against a later
 /// variable-width component, not what makes today's concatenation safe.
 pub(crate) fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
+    tagged_hash_iter(tag, parts.iter().copied())
+}
+
+pub(crate) fn tagged_hash_iter<'a>(
+    tag: &str,
+    parts: impl IntoIterator<Item = &'a [u8]>,
+) -> [u8; 32] {
     let tag_digest = Sha256::digest(tag.as_bytes());
     let mut hasher = Sha256::new();
     hasher.update(tag_digest);

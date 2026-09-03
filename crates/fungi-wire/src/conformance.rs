@@ -310,7 +310,7 @@ mod tests {
         const MESSAGE: &str = "00030568656c6c6f";
         const COMMITMENT: &str = "1761c6636d59a0ed0a8e4c7497d5029e6e3894bf9d620b213b346b4bc6561f8f";
         let mut set = MessageSet::default();
-        set.insert(fixture(MESSAGE));
+        set.insert(fixture(MESSAGE)).unwrap();
         assert_eq!(hex::encode(set.commitment()), COMMITMENT);
     }
 

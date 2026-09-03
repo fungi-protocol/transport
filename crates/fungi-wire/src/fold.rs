@@ -150,7 +150,8 @@ mod tests {
         let mut set = MessageSet::default();
         for p in payloads {
             let msg = Message::new(Body::Confirmation(p.to_vec()));
-            set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+            set.insert(HeaderTlv::encode(&msg).expect("encodable"))
+                .unwrap();
         }
         set
     }
@@ -197,7 +198,8 @@ mod tests {
             .expect("canonical"),
         };
         let mut set = MessageSet::default();
-        set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+        set.insert(HeaderTlv::encode(&msg).expect("encodable"))
+            .unwrap();
 
         assert!(
             fold_at::<HeaderTlv>(150, &set)
@@ -238,7 +240,8 @@ mod tests {
             proptest::collection::vec(any_message_at(now), 0..6).prop_map(|msgs| {
                 let mut set = MessageSet::default();
                 for msg in msgs {
-                    set.insert(HeaderTlv::encode(&msg).expect("encodable"));
+                    set.insert(HeaderTlv::encode(&msg).expect("encodable"))
+                        .unwrap();
                 }
                 set
             })

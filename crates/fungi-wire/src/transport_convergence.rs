@@ -24,7 +24,7 @@ async fn converge<C: BroadcastChannel>(nodes: &mut [C]) -> Vec<MessageSet> {
         .cloned()
         .map(|own| {
             let mut set = MessageSet::default();
-            set.insert(own);
+            set.insert(own).unwrap();
             set
         })
         .collect();
@@ -42,7 +42,7 @@ async fn converge<C: BroadcastChannel>(nodes: &mut [C]) -> Vec<MessageSet> {
                 .await
                 .expect("connected broadcast converges")
                 .expect("broadcast stays alive");
-            set.insert(bytes);
+            set.insert(bytes).unwrap();
         }
     }
     sets
