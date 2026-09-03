@@ -10,6 +10,7 @@ use fungi_transport::mem::MemAddr;
 use fungi_transport::testkit;
 use fungi_transport::{Channel, Connector, ListenParams, Listener, Transport};
 use fungi_transport_capnp::{CapnpTransport, connect_plugin};
+use fungi_wire::{Body, CanonicalMessage, Message, MessageSet};
 
 /// The child plugin binary, built by cargo before this integration test.
 const MEM_PLUGIN: &str = env!("CARGO_BIN_EXE_mem-plugin");
@@ -37,6 +38,47 @@ async fn subprocess_roundtrip() {
     assert_eq!(server.recv().await.unwrap(), b"ping");
     server.send(b"pong").await.unwrap();
     assert_eq!(client.recv().await.unwrap(), b"pong");
+}
+
+/// TYPED MESSAGES: canonical application messages retain their logical
+/// identities across the subprocess boundary. Receiving the same event twice
+/// and inserting events in different orders converges to the same MessageSet.
+#[tokio::test]
+async fn subprocess_typed_messages_converge() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    let payment =
+        CanonicalMessage::encode(&Message::new(Body::Payment(b"payment".to_vec()))).unwrap();
+    let psbt = CanonicalMessage::encode(&Message::new(Body::Psbt(b"fragment".to_vec()))).unwrap();
+
+    client.send(payment.as_bytes()).await.unwrap();
+    client.send(payment.as_bytes()).await.unwrap();
+    server.send(psbt.as_bytes()).await.unwrap();
+
+    let mut client_set = MessageSet::default();
+    client_set.insert(payment.clone()).unwrap();
+    client_set
+        .insert(CanonicalMessage::parse(client.recv().await.unwrap()).unwrap())
+        .unwrap();
+
+    let mut server_set = MessageSet::default();
+    server_set.insert(psbt.clone()).unwrap();
+    for _ in 0..2 {
+        server_set
+            .insert(CanonicalMessage::parse(server.recv().await.unwrap()).unwrap())
+            .unwrap();
+    }
+    assert_eq!(client_set.len(), 2);
+    assert_eq!(server_set.len(), 2);
+    assert_eq!(client_set.commitment(), server_set.commitment());
+    assert_eq!(
+        client_set.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        server_set.iter().map(|(id, _)| id).collect::<Vec<_>>()
+    );
 }
 
 /// CONFORMANCE: run the connection-oriented lifecycle suite through the

@@ -1412,6 +1412,7 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "fungi-transport",
+ "fungi-wire",
  "futures",
  "tokio",
  "tokio-util",
