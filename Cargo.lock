@@ -1431,9 +1431,11 @@ dependencies = [
 name = "fungi-wire"
 version = "0.1.0"
 dependencies = [
+ "fungi-transport",
  "hex",
  "proptest",
  "sha2",
+ "tokio",
 ]
 
 [[package]]

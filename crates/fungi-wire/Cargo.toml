@@ -9,8 +9,10 @@ license.workspace = true
 sha2 = "0.10"
 
 [dev-dependencies]
+fungi-transport = { path = "../fungi-transport" }
 hex = "0.4"
 proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
