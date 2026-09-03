@@ -18,6 +18,8 @@
 
 pub mod bigsize;
 pub mod error;
+pub mod id;
+pub mod message;
 pub mod tlv;
 
 #[cfg(test)]
@@ -26,6 +28,8 @@ mod conformance;
 mod testing;
 
 pub use error::{DecodeError, EncodeError};
+pub use id::{MESSAGE_ID_TAG, MessageId, SET_COMMITMENT_TAG, message_id};
+pub use message::{Body, Message};
 pub use tlv::{TlvRecord, TlvStream};
 
 #[cfg(test)]
