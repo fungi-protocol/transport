@@ -6,6 +6,9 @@ members = [
     "crates/fungi-transport-socks5h",
     "crates/fungi-transport-arti",
 ]
+# Experiment crate: its dev-dependencies live outside this repo, so it
+# carries its own lockfile and stays out of the production build.
+exclude = ["crates/fungi-wire"]
 
 [workspace.package]
 version = "0.1.0"
