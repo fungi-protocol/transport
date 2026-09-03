@@ -19,8 +19,10 @@
 pub mod bigsize;
 pub mod encoding;
 pub mod error;
+pub mod fold;
 pub mod id;
 pub mod message;
+pub mod set;
 pub mod tlv;
 
 #[cfg(test)]
@@ -30,8 +32,10 @@ mod testing;
 
 pub use encoding::{EXT_VALIDITY, Encoding, HeaderTlv};
 pub use error::{DecodeError, EncodeError};
+pub use fold::{AppState, Validity, fold_at};
 pub use id::{MESSAGE_ID_TAG, MessageId, SET_COMMITMENT_TAG, message_id};
 pub use message::{Body, Message};
+pub use set::MessageSet;
 pub use tlv::{TlvRecord, TlvStream};
 
 #[cfg(test)]
