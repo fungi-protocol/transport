@@ -13,8 +13,20 @@
 use crate::error::DecodeError;
 use crate::tlv::TlvStream;
 
-/// A message body. Provisional numbers: the assignment is a wire
-/// decision this crate does not have the authority to take.
+/// Wire type for a partially signed transaction or fragment.
+pub const TYPE_PSBT: u16 = 1;
+/// Wire type for a payment.
+pub const TYPE_PAYMENT: u16 = 3;
+/// Wire type for a confirmation.
+pub const TYPE_CONFIRMATION: u16 = 5;
+/// Wire type for a listen advertisement.
+pub const TYPE_LISTEN_ADVERTISEMENT: u16 = 7;
+/// Wire type for a block carrying another encoded message.
+pub const TYPE_BLOCK: u16 = 9;
+/// Wire type for a block-validity proof.
+pub const TYPE_VALIDITY_PROOF: u16 = 11;
+
+/// A message body using the registry proposed by this experiment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Body {
@@ -37,12 +49,12 @@ impl Body {
     /// The wire type identifying this kind.
     pub fn wire_type(&self) -> u16 {
         match self {
-            Body::Psbt(_) => 1,
-            Body::Payment(_) => 3,
-            Body::Confirmation(_) => 5,
-            Body::ListenAdvertisement(_) => 7,
-            Body::Block(_) => 9,
-            Body::ValidityProof(_) => 11,
+            Body::Psbt(_) => TYPE_PSBT,
+            Body::Payment(_) => TYPE_PAYMENT,
+            Body::Confirmation(_) => TYPE_CONFIRMATION,
+            Body::ListenAdvertisement(_) => TYPE_LISTEN_ADVERTISEMENT,
+            Body::Block(_) => TYPE_BLOCK,
+            Body::ValidityProof(_) => TYPE_VALIDITY_PROOF,
         }
     }
 
@@ -61,12 +73,12 @@ impl Body {
     /// Rebuild a body from its wire type.
     pub fn from_wire_type(ty: u16, payload: Vec<u8>) -> Result<Body, DecodeError> {
         match ty {
-            1 => Ok(Body::Psbt(payload)),
-            3 => Ok(Body::Payment(payload)),
-            5 => Ok(Body::Confirmation(payload)),
-            7 => Ok(Body::ListenAdvertisement(payload)),
-            9 => Ok(Body::Block(payload)),
-            11 => Ok(Body::ValidityProof(payload)),
+            TYPE_PSBT => Ok(Body::Psbt(payload)),
+            TYPE_PAYMENT => Ok(Body::Payment(payload)),
+            TYPE_CONFIRMATION => Ok(Body::Confirmation(payload)),
+            TYPE_LISTEN_ADVERTISEMENT => Ok(Body::ListenAdvertisement(payload)),
+            TYPE_BLOCK => Ok(Body::Block(payload)),
+            TYPE_VALIDITY_PROOF => Ok(Body::ValidityProof(payload)),
             odd if odd % 2 == 1 => Err(DecodeError::UnknownIgnorableMessageType { ty: odd }),
             even => Err(DecodeError::UnknownRequiredMessageType { ty: even }),
         }

@@ -12,6 +12,8 @@ sha2 = "0.10"
 proptest = "1"
 hex = "0.4"
 concurrent-psbt = { path = "../../../concurrent-psbt/crates/concurrent-psbt" }
+fungi-transport = { path = "../fungi-transport" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints.rust]
 missing_docs = "warn"

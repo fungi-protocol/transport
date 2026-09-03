@@ -40,6 +40,20 @@ impl MessageSet {
         self.0.iter().map(|(id, bytes)| (id, bytes.as_slice()))
     }
 
+    /// Join `other` into this grow-only set.
+    pub fn merge(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+
+    /// Return the union of two grow-only message sets.
+    ///
+    /// Union is associative, commutative and idempotent, so peers may merge
+    /// snapshots in any order and repeat merges without changing the result.
+    pub fn union(mut self, other: Self) -> Self {
+        self.merge(other);
+        self
+    }
+
     /// A commitment to exactly this set.
     ///
     /// Identities are fixed width and traversed in order, so the digest
@@ -63,7 +77,7 @@ impl MessageSet {
 #[cfg(test)]
 impl concurrent_psbt::Join for MessageSet {
     fn join(mut self, other: Self) -> Self {
-        self.0.extend(other.0);
+        self.merge(other);
         self
     }
 }
@@ -93,6 +107,18 @@ pub(crate) mod tests {
         let b = set.insert(HeaderTlv::encode(&msg).expect("encodable"));
         assert_eq!(a, b);
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn public_union_merges_without_consuming_the_left_hand_api() {
+        let a = set_of(&[b"a", b"b"]);
+        let b = set_of(&[b"b", b"c"]);
+        let expected = set_of(&[b"a", b"b", b"c"]);
+
+        assert_eq!(a.clone().union(b.clone()), expected);
+        let mut merged = a;
+        merged.merge(b);
+        assert_eq!(merged, expected);
     }
 
     #[test]

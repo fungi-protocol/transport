@@ -29,17 +29,18 @@ pub mod tlv;
 mod conformance;
 #[cfg(test)]
 mod testing;
-
-// All three candidates are re-exported, and the nesting helpers with
-// them. Promoting one shape to the crate root would put a thumb on a
-// scale whose whole purpose is to be read as neutral.
+#[cfg(test)]
+mod transport_convergence;
 pub use encoding::{AllTlv, EXT_VALIDITY, Encoding, HeaderTlv, KvPairs, unwrap_block, wrap};
 pub use error::{DecodeError, EncodeError};
 pub use fold::{AppState, Validity, fold_at};
 pub use id::{
     MESSAGE_ID_TAG, MessageId, SET_COMMITMENT_TAG, SHORT_ID_TAG, ShortId, message_id, short_id,
 };
-pub use message::{Body, Message};
+pub use message::{
+    Body, Message, TYPE_BLOCK, TYPE_CONFIRMATION, TYPE_LISTEN_ADVERTISEMENT, TYPE_PAYMENT,
+    TYPE_PSBT, TYPE_VALIDITY_PROOF,
+};
 pub use set::MessageSet;
 pub use tlv::{TlvRecord, TlvStream};
 

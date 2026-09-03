@@ -284,4 +284,42 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn candidate_message_and_identity_vectors() {
+        use crate::{Body, Encoding, HeaderTlv, Message, message_id};
+
+        // Registry type 3, five-byte payload, no extensions.
+        const MESSAGE: &str = "00030568656c6c6f";
+        const ID: &str = "b07b1a6952660c8d133472485c1d7dc237dd9e379fa653bfea728bea3283c1ff";
+
+        let logical = Message::new(Body::Payment(b"hello".to_vec()));
+        let bytes = fixture(MESSAGE);
+        assert_eq!(
+            HeaderTlv::encode(&logical).map(hex::encode),
+            Ok(MESSAGE.to_owned())
+        );
+        assert_eq!(HeaderTlv::decode(&bytes), Ok(logical));
+        assert_eq!(hex::encode(message_id(&bytes)), ID);
+    }
+
+    #[test]
+    fn candidate_singleton_set_commitment_vector() {
+        use crate::MessageSet;
+
+        const MESSAGE: &str = "00030568656c6c6f";
+        const COMMITMENT: &str = "1761c6636d59a0ed0a8e4c7497d5029e6e3894bf9d620b213b346b4bc6561f8f";
+        let mut set = MessageSet::default();
+        set.insert(fixture(MESSAGE));
+        assert_eq!(hex::encode(set.commitment()), COMMITMENT);
+    }
+
+    #[test]
+    fn kv_pairs_rejects_overflowing_lengths_without_panicking() {
+        use crate::{Encoding, KvPairs};
+
+        // magic, PSBT type, then a maximally wide key length.
+        let bytes = fixture("66756e6769000001ffffffffffffffffff");
+        assert_eq!(KvPairs::decode(&bytes), Err(DecodeError::UnexpectedEof));
+    }
 }
