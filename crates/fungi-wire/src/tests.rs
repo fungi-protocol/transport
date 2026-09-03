@@ -57,6 +57,37 @@ fn set_commitment_vector_is_byte_exact_and_order_independent() {
 }
 
 #[test]
+fn empty_and_singleton_commitments_are_byte_exact() {
+    let empty = MessageSet::default();
+    assert_eq!(
+        hex::encode(empty.commitment().as_bytes()),
+        "328cabc016c3f0ffae70d63344b34ec8c07d3facb6bf107056225a77e3e80aa3"
+    );
+
+    let mut singleton = MessageSet::default();
+    singleton.insert(canonical(b"hello")).unwrap();
+    assert_eq!(
+        hex::encode(singleton.commitment().as_bytes()),
+        "9d01f77bdc3af2e60e78fd3f9945e289bdd627e0a949f7c9316cb0c7a40f4371"
+    );
+}
+
+#[test]
+fn extension_message_vector_is_byte_exact() {
+    let message = Message {
+        body: Body::Payment(b"x".to_vec()),
+        extensions: Extensions::new(vec![Extension {
+            ty: 1,
+            value: b"e".to_vec(),
+        }])
+        .unwrap(),
+    };
+    let canonical = CanonicalMessage::encode(&message).unwrap();
+    assert_eq!(hex::encode(canonical.as_bytes()), "00030178010165");
+    assert_eq!(canonical.decode(), message);
+}
+
+#[test]
 fn unknown_odd_survives_and_unknown_even_fails() {
     let odd = hex::decode("03e9066f7061717565").unwrap();
     assert_eq!(
@@ -123,6 +154,9 @@ fn complete_message_limit_is_enforced_at_the_boundary() {
         encoded
     );
 
+    let one_under = canonical(&vec![0; MAX_MESSAGE_SIZE - 8]);
+    assert_eq!(one_under.as_bytes().len(), MAX_MESSAGE_SIZE - 1);
+
     let too_large = Message::new(Body::Payment(vec![0; MAX_MESSAGE_SIZE - 6]));
     assert_eq!(
         CanonicalMessage::encode(&too_large),
@@ -131,6 +165,72 @@ fn complete_message_limit_is_enforced_at_the_boundary() {
             actual: MAX_MESSAGE_SIZE + 1,
         })
     );
+
+    let extension_at_limit = Message {
+        body: Body::Payment(Vec::new()),
+        extensions: Extensions::new(vec![Extension {
+            ty: 1,
+            value: vec![0; MAX_MESSAGE_SIZE - 9],
+        }])
+        .unwrap(),
+    };
+    assert_eq!(
+        CanonicalMessage::encode(&extension_at_limit)
+            .unwrap()
+            .as_bytes()
+            .len(),
+        MAX_MESSAGE_SIZE
+    );
+    let extension_over_limit = Message {
+        body: Body::Payment(Vec::new()),
+        extensions: Extensions::new(vec![Extension {
+            ty: 1,
+            value: vec![0; MAX_MESSAGE_SIZE - 8],
+        }])
+        .unwrap(),
+    };
+    assert!(matches!(
+        CanonicalMessage::encode(&extension_over_limit),
+        Err(EncodeError::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn small_set_union_laws_hold_exhaustively() {
+    let universe = [canonical(b"a"), canonical(b"b"), canonical(b"c")];
+    let sets = (0u8..8)
+        .map(|mask| {
+            let mut set = MessageSet::default();
+            for (bit, message) in universe.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    set.insert(message.clone()).unwrap();
+                }
+            }
+            set
+        })
+        .collect::<Vec<_>>();
+
+    for a in &sets {
+        assert_eq!(a.clone().union(a.clone()).unwrap(), *a);
+        for b in &sets {
+            assert_eq!(
+                a.clone().union(b.clone()).unwrap(),
+                b.clone().union(a.clone()).unwrap()
+            );
+            for c in &sets {
+                assert_eq!(
+                    a.clone()
+                        .union(b.clone())
+                        .unwrap()
+                        .union(c.clone())
+                        .unwrap(),
+                    a.clone()
+                        .union(b.clone().union(c.clone()).unwrap())
+                        .unwrap()
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -238,6 +338,7 @@ proptest! {
             ).unwrap(),
         };
         let canonical = CanonicalMessage::encode(&message).unwrap();
+        prop_assert_eq!(crate::encoding::encoded_len(&message).unwrap(), canonical.as_bytes().len());
         prop_assert_eq!(CanonicalMessage::parse(canonical.as_bytes().to_vec()).unwrap(), canonical);
     }
 }

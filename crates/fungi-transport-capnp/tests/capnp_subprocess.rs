@@ -10,7 +10,9 @@ use fungi_transport::mem::MemAddr;
 use fungi_transport::testkit;
 use fungi_transport::{Channel, Connector, ListenParams, Listener, Transport};
 use fungi_transport_capnp::{CapnpTransport, connect_plugin};
-use fungi_wire::{Body, CanonicalMessage, Message, MessageSet};
+use fungi_wire::{
+    Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageSet,
+};
 
 /// The child plugin binary, built by cargo before this integration test.
 const MEM_PLUGIN: &str = env!("CARGO_BIN_EXE_mem-plugin");
@@ -51,29 +53,48 @@ async fn subprocess_typed_messages_converge() {
 
     let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
-    let payment =
-        CanonicalMessage::encode(&Message::new(Body::Payment(b"payment".to_vec()))).unwrap();
+    let payment = CanonicalMessage::encode(&Message {
+        body: Body::Payment(b"payment".to_vec()),
+        extensions: Extensions::new(vec![Extension {
+            ty: 1,
+            value: b"optional".to_vec(),
+        }])
+        .unwrap(),
+    })
+    .unwrap();
     let psbt = CanonicalMessage::encode(&Message::new(Body::Psbt(b"fragment".to_vec()))).unwrap();
+    let boundary = CanonicalMessage::encode(&Message::new(Body::Confirmation(vec![
+        0;
+        MAX_MESSAGE_SIZE
+            - 7
+    ])))
+    .unwrap();
+    assert_eq!(boundary.as_bytes().len(), MAX_MESSAGE_SIZE);
+    let invalid = hex::decode("0003fd000568656c6c6f").unwrap();
 
     client.send(payment.as_bytes()).await.unwrap();
     client.send(payment.as_bytes()).await.unwrap();
+    client.send(boundary.as_bytes()).await.unwrap();
     server.send(psbt.as_bytes()).await.unwrap();
+    server.send(&invalid).await.unwrap();
 
     let mut client_set = MessageSet::default();
     client_set.insert(payment.clone()).unwrap();
+    client_set.insert(boundary.clone()).unwrap();
     client_set
         .insert(CanonicalMessage::parse(client.recv().await.unwrap()).unwrap())
         .unwrap();
+    assert!(CanonicalMessage::parse(client.recv().await.unwrap()).is_err());
 
     let mut server_set = MessageSet::default();
     server_set.insert(psbt.clone()).unwrap();
-    for _ in 0..2 {
+    for _ in 0..3 {
         server_set
             .insert(CanonicalMessage::parse(server.recv().await.unwrap()).unwrap())
             .unwrap();
     }
-    assert_eq!(client_set.len(), 2);
-    assert_eq!(server_set.len(), 2);
+    assert_eq!(client_set.len(), 3);
+    assert_eq!(server_set.len(), 3);
     assert_eq!(client_set.commitment(), server_set.commitment());
     assert_eq!(
         client_set.iter().map(|(id, _)| id).collect::<Vec<_>>(),

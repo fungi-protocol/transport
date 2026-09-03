@@ -34,12 +34,14 @@ impl Extensions {
                 .ok_or(EncodeError::LengthOverflow)
         })
     }
-    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
         for r in &self.0 {
             bigsize::encode(r.ty, out);
-            bigsize::encode(r.value.len() as u64, out);
+            let len = u64::try_from(r.value.len()).map_err(|_| EncodeError::LengthOverflow)?;
+            bigsize::encode(len, out);
             out.extend_from_slice(&r.value);
         }
+        Ok(())
     }
     pub(crate) fn decode(mut bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut records = Vec::new();
@@ -83,7 +85,7 @@ mod tests {
             let bytes = hex::decode(encoded).expect("valid fixture hex");
             let stream = Extensions::decode(&bytes).expect("unknown odd record is optional");
             let mut out = Vec::new();
-            stream.encode(&mut out);
+            stream.encode(&mut out).unwrap();
             assert_eq!(out, bytes, "{encoded}");
         }
     }

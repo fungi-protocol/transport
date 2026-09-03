@@ -27,11 +27,6 @@ pub enum DecodeError {
         /// Unknown even type.
         ty: u64,
     },
-    /// A known extension carried an invalid value.
-    BadExtensionValue {
-        /// Known type whose value failed validation.
-        ty: u64,
-    },
 }
 
 /// Failure to encode a typed message.
@@ -58,12 +53,32 @@ pub struct IdentityCollision {
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::TooLarge { max, actual } => {
+                write!(f, "canonical message is {actual} bytes; maximum is {max}")
+            }
+            Self::UnexpectedEof => f.write_str("message ended inside a field"),
+            Self::NonMinimalInteger => f.write_str("BigSize integer is not minimally encoded"),
+            Self::NonCanonicalExtensions => {
+                f.write_str("extension records are not in strict canonical order")
+            }
+            Self::UnknownRequiredMessageType { ty } => {
+                write!(f, "unknown required message type {ty}")
+            }
+            Self::UnknownRequiredExtension { ty } => {
+                write!(f, "unknown required extension type {ty}")
+            }
+        }
     }
 }
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::LengthOverflow => f.write_str("canonical message length overflowed usize"),
+            Self::TooLarge { max, actual } => {
+                write!(f, "canonical message is {actual} bytes; maximum is {max}")
+            }
+        }
     }
 }
 impl fmt::Display for IdentityCollision {

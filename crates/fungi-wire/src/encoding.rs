@@ -21,9 +21,11 @@ impl CanonicalMessage {
         }
         let mut bytes = Vec::with_capacity(actual);
         bytes.extend_from_slice(&message.body.wire_type().to_be_bytes());
-        bigsize::encode(message.body.payload().len() as u64, &mut bytes);
+        let payload_len =
+            u64::try_from(message.body.payload().len()).map_err(|_| EncodeError::LengthOverflow)?;
+        bigsize::encode(payload_len, &mut bytes);
         bytes.extend_from_slice(message.body.payload());
-        message.extensions.encode(&mut bytes);
+        message.extensions.encode(&mut bytes)?;
         debug_assert_eq!(bytes.len(), actual);
         Ok(Self::from_validated(bytes))
     }
@@ -66,7 +68,7 @@ impl CanonicalMessage {
     }
 }
 
-fn encoded_len(message: &Message) -> Result<usize, EncodeError> {
+pub(crate) fn encoded_len(message: &Message) -> Result<usize, EncodeError> {
     let payload = message.body.payload().len();
     let payload64 = u64::try_from(payload).map_err(|_| EncodeError::LengthOverflow)?;
     2usize
@@ -77,13 +79,12 @@ fn encoded_len(message: &Message) -> Result<usize, EncodeError> {
 }
 
 fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
-    let ty = u16::from_be_bytes(
-        bytes
-            .get(..2)
-            .ok_or(DecodeError::UnexpectedEof)?
-            .try_into()
-            .unwrap(),
-    );
+    let ty_bytes: [u8; 2] = bytes
+        .get(..2)
+        .ok_or(DecodeError::UnexpectedEof)?
+        .try_into()
+        .map_err(|_| DecodeError::UnexpectedEof)?;
+    let ty = u16::from_be_bytes(ty_bytes);
     let rest = &bytes[2..];
     let (len, used) = bigsize::decode(rest)?;
     let rest = &rest[used..];
