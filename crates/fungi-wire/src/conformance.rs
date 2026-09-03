@@ -1,8 +1,9 @@
 //! Fixture-driven conformance for the integer and extension codecs.
 //!
 //! Data transcribed from BOLT #1
-//! (<https://github.com/lightning/bolts/blob/master/01-messaging.md>,
-//! `01-messaging.md`, fetched 2026-09-03), Appendix A (BigSize) and
+//! (<https://github.com/lightning/bolts/blob/152897261850d93c4f4597f39cf22d7d22d6ede6/01-messaging.md>,
+//! `01-messaging.md` at commit `152897261850d93c4f4597f39cf22d7d22d6ede6`),
+//! Appendix A (BigSize) and
 //! Appendix B (TLV streams). Kept in one module so the fixtures can be
 //! read against their published source without reading the codecs.
 //!

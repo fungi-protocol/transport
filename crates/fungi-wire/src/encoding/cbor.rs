@@ -8,7 +8,9 @@ use crate::error::{DecodeError, EncodeError};
 use crate::message::{Body, Message};
 use crate::tlv::{TlvRecord, TlvStream};
 
-/// A whole-message CBOR map using RFC 8949 core deterministic encoding.
+/// A whole-message CBOR map using
+/// [RFC 8949 §4.2.1](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2.1)
+/// core deterministic encoding.
 #[derive(Debug)]
 pub enum DeterministicCbor {}
 
