@@ -38,6 +38,17 @@ impl TlvStream {
         &self.0
     }
 
+    /// Consume the stream, yielding its records.
+    ///
+    /// A decoder that must take records apart moves them out through
+    /// this rather than cloning them through [`records`](Self::records).
+    /// Without it, a format whose decoder goes through this type would
+    /// look costlier than its rivals for reasons belonging to this API
+    /// rather than to the format.
+    pub fn into_records(self) -> Vec<TlvRecord> {
+        self.0
+    }
+
     /// Append the stream's encoding.
     pub fn encode(&self, out: &mut Vec<u8>) {
         for rec in &self.0 {

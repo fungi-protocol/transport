@@ -90,6 +90,71 @@ impl Encoding for HeaderTlv {
     }
 }
 
+/// The whole message as one extension stream: record 1 carries the kind,
+/// record 2 the payload, everything above 2 is an extension.
+///
+/// Uniformity costs a namespace — types 1 and 2 are spent on structure
+/// and cannot be assigned — and a message with no extensions still pays
+/// two record headers.
+#[derive(Debug)]
+pub enum AllTlv {}
+
+/// Record type carrying the message kind.
+const KIND_RECORD: u64 = 1;
+/// Record type carrying the payload.
+const PAYLOAD_RECORD: u64 = 2;
+
+impl Encoding for AllTlv {
+    const NAME: &'static str = "all-tlv";
+
+    fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError> {
+        if let Some(rec) = msg
+            .extensions
+            .records()
+            .iter()
+            .find(|r| r.ty <= PAYLOAD_RECORD)
+        {
+            return Err(EncodeError::ReservedExtensionType { ty: rec.ty });
+        }
+        let mut out = Vec::new();
+        bigsize::encode(KIND_RECORD, &mut out);
+        bigsize::encode(2, &mut out);
+        out.extend_from_slice(&msg.body.wire_type().to_be_bytes());
+        let payload = msg.body.payload();
+        bigsize::encode(PAYLOAD_RECORD, &mut out);
+        bigsize::encode(payload.len() as u64, &mut out);
+        out.extend_from_slice(payload);
+        msg.extensions.encode(&mut out);
+        Ok(out)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
+        // Records are MOVED out, never cloned. Cloning here would charge
+        // this format for allocations belonging to the stream type's
+        // borrowing API, and the whole point of the comparison is to
+        // charge each format only for itself.
+        let mut records = TlvStream::decode(bytes)?.into_records();
+        if records.len() < 2 {
+            return Err(DecodeError::UnexpectedEof);
+        }
+        let extensions =
+            TlvStream::new(records.split_off(2)).expect("a canonical stream's tail is canonical");
+        let payload = records.pop().expect("length checked above");
+        let kind = records.pop().expect("length checked above");
+        if kind.ty != KIND_RECORD || payload.ty != PAYLOAD_RECORD {
+            return Err(DecodeError::NonCanonicalTlv);
+        }
+        let ty: [u8; 2] = kind
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| DecodeError::BadBody)?;
+        let body = Body::from_wire_type(u16::from_be_bytes(ty), payload.value)?;
+        reject_unknown_even(&extensions)?;
+        Ok(Message { body, extensions })
+    }
+}
+
 /// Carry `inner` as the payload of a block, verbatim.
 ///
 /// The inner message is not re-encoded on the way in or out, so its
@@ -252,4 +317,57 @@ pub(crate) mod suite {
     }
 
     encoding_suite!(header_tlv, crate::encoding::HeaderTlv);
+    encoding_suite!(all_tlv, crate::encoding::AllTlv);
+
+    /// Where the two shapes genuinely differ: the uniform stream spends
+    /// record types on its own structure, so there are messages it cannot
+    /// represent and the header shape can. A finding, not a bug — which is
+    /// why it is a typed error rather than a panic.
+    #[test]
+    fn only_the_uniform_shape_reserves_extension_types() {
+        use crate::encoding::{AllTlv, Encoding, HeaderTlv};
+        use crate::error::EncodeError;
+        use crate::message::{Body, Message};
+        use crate::tlv::{TlvRecord, TlvStream};
+
+        let msg = Message {
+            body: Body::Psbt(b"x".to_vec()),
+            extensions: TlvStream::new(vec![TlvRecord {
+                ty: 1,
+                value: b"y".to_vec(),
+            }])
+            .expect("canonical"),
+        };
+        assert!(HeaderTlv::encode(&msg).is_ok());
+        assert_eq!(
+            AllTlv::encode(&msg),
+            Err(EncodeError::ReservedExtensionType { ty: 1 })
+        );
+    }
+
+    /// The sharper consequence: `EXT_VALIDITY` is 2, exactly the record
+    /// type `AllTlv` reserves for its payload, so the uniform shape cannot
+    /// carry the protocol's one assigned extension type at all — not just
+    /// some hypothetical low-numbered one.
+    #[test]
+    fn the_uniform_shape_cannot_carry_the_assigned_extension() {
+        use crate::encoding::{AllTlv, EXT_VALIDITY, Encoding, HeaderTlv};
+        use crate::error::EncodeError;
+        use crate::message::{Body, Message};
+        use crate::tlv::{TlvRecord, TlvStream};
+
+        let msg = Message {
+            body: Body::Psbt(b"x".to_vec()),
+            extensions: TlvStream::new(vec![TlvRecord {
+                ty: EXT_VALIDITY,
+                value: vec![0u8; 16],
+            }])
+            .expect("canonical"),
+        };
+        assert!(HeaderTlv::encode(&msg).is_ok());
+        assert_eq!(
+            AllTlv::encode(&msg),
+            Err(EncodeError::ReservedExtensionType { ty: EXT_VALIDITY })
+        );
+    }
 }
