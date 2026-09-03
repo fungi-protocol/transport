@@ -155,6 +155,131 @@ impl Encoding for AllTlv {
     }
 }
 
+/// A magic string, the kind, then key-value pairs sorted by key and
+/// terminated by an empty key.
+///
+/// Keys are explicit rather than positional, which costs bytes per field
+/// but makes the format self-describing without a shared schema. Key
+/// `0x00` is the payload; an extension of type T has key `0x01` followed
+/// by T, so extensions sort after the payload and keep their own order.
+#[derive(Debug)]
+pub enum KvPairs {}
+
+/// Distinguishes this format from anything else on the wire.
+const KV_MAGIC: &[u8; 6] = b"fungi\x00";
+/// Key prefix for the body payload.
+const KV_KEY_PAYLOAD: u8 = 0x00;
+/// Key prefix for an extension record.
+const KV_KEY_EXTENSION: u8 = 0x01;
+
+impl Encoding for KvPairs {
+    const NAME: &'static str = "kv-pairs";
+
+    fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError> {
+        let mut out = Vec::new();
+        out.extend_from_slice(KV_MAGIC);
+        out.extend_from_slice(&msg.body.wire_type().to_be_bytes());
+        push_pair(&mut out, &[KV_KEY_PAYLOAD], msg.body.payload());
+        for rec in msg.extensions.records() {
+            let mut key = vec![KV_KEY_EXTENSION];
+            bigsize::encode(rec.ty, &mut key);
+            push_pair(&mut out, &key, &rec.value);
+        }
+        // Empty key terminates: the pairs are variable in number, so the
+        // buffer's end alone would not distinguish a truncated stream.
+        bigsize::encode(0, &mut out);
+        Ok(out)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
+        let rest = bytes.strip_prefix(KV_MAGIC).ok_or(DecodeError::BadBody)?;
+        let ty: [u8; 2] = rest
+            .get(..2)
+            .ok_or(DecodeError::UnexpectedEof)?
+            .try_into()
+            .map_err(|_| DecodeError::UnexpectedEof)?;
+        let mut rest = &rest[2..];
+
+        let mut payload: Option<Vec<u8>> = None;
+        let mut records = Vec::new();
+        // Keys are BORROWED from the input, never copied. Nothing needs a
+        // key past the iteration that parses it — it is compared, split,
+        // and dropped — so materialising one would charge this format for
+        // an allocation the shape does not require, and the comparison
+        // between shapes is the whole point.
+        let mut last_key: Option<&[u8]> = None;
+        loop {
+            let (key, value, used) = take_pair(rest)?;
+            rest = &rest[used..];
+            let Some(key) = key else { break };
+            if let Some(prev) = last_key
+                && prev >= key
+            {
+                return Err(DecodeError::NonCanonicalTlv);
+            }
+            match key.split_first() {
+                Some((&KV_KEY_PAYLOAD, [])) => payload = Some(value),
+                Some((&KV_KEY_EXTENSION, ty_bytes)) => {
+                    let (rec_ty, used) = bigsize::decode(ty_bytes)?;
+                    if used != ty_bytes.len() {
+                        return Err(DecodeError::NonCanonicalTlv);
+                    }
+                    records.push(crate::tlv::TlvRecord { ty: rec_ty, value });
+                }
+                _ => return Err(DecodeError::BadBody),
+            }
+            last_key = Some(key);
+        }
+        if !rest.is_empty() {
+            return Err(DecodeError::NonCanonicalTlv);
+        }
+        let body =
+            Body::from_wire_type(u16::from_be_bytes(ty), payload.ok_or(DecodeError::BadBody)?)?;
+        let extensions = TlvStream::new(records)?;
+        reject_unknown_even(&extensions)?;
+        Ok(Message { body, extensions })
+    }
+}
+
+fn push_pair(out: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    bigsize::encode(key.len() as u64, out);
+    out.extend_from_slice(key);
+    bigsize::encode(value.len() as u64, out);
+    out.extend_from_slice(value);
+}
+
+/// Read one pair, or `None` for the terminating empty key. Returns how
+/// many bytes were consumed.
+///
+/// The key is returned borrowed and the value owned, because that is
+/// what each is used for: the key is compared and discarded within one
+/// iteration, while the value is kept in the decoded message.
+#[allow(clippy::type_complexity)]
+fn take_pair(bytes: &[u8]) -> Result<(Option<&[u8]>, Vec<u8>, usize), DecodeError> {
+    let (key_len, mut used) = bigsize::decode(bytes)?;
+    if key_len == 0 {
+        return Ok((None, Vec::new(), used));
+    }
+    let key_len = usize::try_from(key_len).map_err(|_| DecodeError::UnexpectedEof)?;
+    let key_end = used
+        .checked_add(key_len)
+        .ok_or(DecodeError::UnexpectedEof)?;
+    let key = bytes.get(used..key_end).ok_or(DecodeError::UnexpectedEof)?;
+    used = key_end;
+    let (val_len, n) = bigsize::decode(&bytes[used..])?;
+    used += n;
+    let val_len = usize::try_from(val_len).map_err(|_| DecodeError::UnexpectedEof)?;
+    let value_end = used
+        .checked_add(val_len)
+        .ok_or(DecodeError::UnexpectedEof)?;
+    let value = bytes
+        .get(used..value_end)
+        .ok_or(DecodeError::UnexpectedEof)?
+        .to_vec();
+    used = value_end;
+    Ok((Some(key), value, used))
+}
+
 /// Carry `inner` as the payload of a block, verbatim.
 ///
 /// The inner message is not re-encoded on the way in or out, so its
@@ -318,6 +443,7 @@ pub(crate) mod suite {
 
     encoding_suite!(header_tlv, crate::encoding::HeaderTlv);
     encoding_suite!(all_tlv, crate::encoding::AllTlv);
+    encoding_suite!(kv_pairs, crate::encoding::KvPairs);
 
     /// Where the two shapes genuinely differ: the uniform stream spends
     /// record types on its own structure, so there are messages it cannot
