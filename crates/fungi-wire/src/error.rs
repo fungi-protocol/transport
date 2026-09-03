@@ -44,6 +44,13 @@ pub enum EncodeError {
     },
 }
 
+/// A wire type cannot be used for an unassigned, ignorable message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidUnknownMessageType {
+    /// Rejected wire type.
+    pub ty: u16,
+}
+
 /// Different canonical bytes were observed under the same full identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityCollision {
@@ -90,6 +97,16 @@ impl fmt::Display for IdentityCollision {
         Ok(())
     }
 }
+impl fmt::Display for InvalidUnknownMessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "message type {} is even or already assigned by this registry",
+            self.ty
+        )
+    }
+}
 impl Error for DecodeError {}
 impl Error for EncodeError {}
 impl Error for IdentityCollision {}
+impl Error for InvalidUnknownMessageType {}

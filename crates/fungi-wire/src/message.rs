@@ -1,4 +1,4 @@
-use crate::{DecodeError, Extensions};
+use crate::{DecodeError, Extensions, InvalidUnknownMessageType};
 
 /// PSBT fragment message type.
 pub const TYPE_PSBT: u16 = 1;
@@ -14,6 +14,14 @@ pub struct UnknownBody {
     payload: Vec<u8>,
 }
 impl UnknownBody {
+    /// Construct an opaque body for an unassigned, ignorable wire type.
+    pub fn new(ty: u16, payload: Vec<u8>) -> Result<Self, InvalidUnknownMessageType> {
+        if ty.is_multiple_of(2) || matches!(ty, TYPE_PSBT | TYPE_PAYMENT | TYPE_CONFIRMATION) {
+            return Err(InvalidUnknownMessageType { ty });
+        }
+        Ok(Self { ty, payload })
+    }
+
     /// Original odd wire type.
     pub fn wire_type(&self) -> u16 {
         self.ty
@@ -59,7 +67,10 @@ impl Body {
             TYPE_PSBT => Self::Psbt(payload),
             TYPE_PAYMENT => Self::Payment(payload),
             TYPE_CONFIRMATION => Self::Confirmation(payload),
-            odd if odd % 2 == 1 => Self::Unknown(UnknownBody { ty: odd, payload }),
+            odd if odd % 2 == 1 => Self::Unknown(
+                UnknownBody::new(odd, payload)
+                    .expect("known message types were matched before unknown odd types"),
+            ),
             even => return Err(DecodeError::UnknownRequiredMessageType { ty: even }),
         })
     }
@@ -99,6 +110,20 @@ mod tests {
         assert!(types.iter().all(|ty| ty % 2 == 1));
         for body in bodies {
             assert_eq!(Body::decode(body.wire_type(), Vec::new()), Ok(body));
+        }
+    }
+
+    #[test]
+    fn unknown_body_accepts_only_unassigned_odd_types() {
+        let body = UnknownBody::new(1_001, b"opaque".to_vec()).unwrap();
+        assert_eq!(body.wire_type(), 1_001);
+        assert_eq!(body.payload(), b"opaque");
+
+        for ty in [0, 2, TYPE_PSBT, TYPE_PAYMENT, TYPE_CONFIRMATION] {
+            assert_eq!(
+                UnknownBody::new(ty, Vec::new()),
+                Err(InvalidUnknownMessageType { ty })
+            );
         }
     }
 }

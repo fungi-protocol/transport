@@ -18,7 +18,7 @@ mod tests;
 mod tlv;
 
 pub use encoding::{CanonicalMessage, MAX_MESSAGE_SIZE};
-pub use error::{DecodeError, EncodeError, IdentityCollision};
+pub use error::{DecodeError, EncodeError, IdentityCollision, InvalidUnknownMessageType};
 pub use id::{MESSAGE_ID_TAG, MessageId, MessageSetCommitment, SET_COMMITMENT_TAG};
 pub use message::{Body, Message, TYPE_CONFIRMATION, TYPE_PAYMENT, TYPE_PSBT, UnknownBody};
 pub use set::MessageSet;
