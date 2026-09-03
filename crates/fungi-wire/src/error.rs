@@ -32,12 +32,6 @@ pub enum DecodeError {
         /// The record type.
         ty: u64,
     },
-    /// A message type this build does not understand, of odd number: a
-    /// peer may relay it and carry on.
-    UnknownIgnorableMessageType {
-        /// The message type.
-        ty: u16,
-    },
     /// A message type this build does not understand, of even number:
     /// carrying on is not permitted.
     UnknownRequiredMessageType {
@@ -93,9 +87,6 @@ impl fmt::Display for DecodeError {
             DecodeError::NonCanonicalTlv => f.write_str("extension stream is not canonical"),
             DecodeError::UnknownEvenExtension { ty } => {
                 write!(f, "unknown extension record of even type {ty}")
-            }
-            DecodeError::UnknownIgnorableMessageType { ty } => {
-                write!(f, "unknown message type {ty}, safe to ignore")
             }
             DecodeError::UnknownRequiredMessageType { ty } => {
                 write!(f, "unknown message type {ty}, not safe to ignore")

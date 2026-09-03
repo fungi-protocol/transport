@@ -465,6 +465,14 @@ pub(crate) mod suite {
                 }
 
                 #[test]
+                fn an_unknown_odd_message_survives_verbatim() {
+                    let body = Body::from_wire_type(1001, b"opaque".to_vec()).unwrap();
+                    let msg = Message::new(body);
+                    let bytes = enc(&msg);
+                    assert_eq!(<Enc as Encoding>::decode(&bytes), Ok(msg));
+                }
+
+                #[test]
                 fn a_wrapped_message_keeps_its_identity() {
                     let inner = Message::new(Body::Psbt(b"inner payload".to_vec()));
                     let inner_bytes = enc(&inner);

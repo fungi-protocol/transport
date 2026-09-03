@@ -26,6 +26,25 @@ pub const TYPE_BLOCK: u16 = 9;
 /// Wire type for a block-validity proof.
 pub const TYPE_VALIDITY_PROOF: u16 = 11;
 
+/// Body of an unassigned odd message, preserved for transparent relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownBody {
+    ty: u16,
+    payload: Vec<u8>,
+}
+
+impl UnknownBody {
+    /// Original odd wire type.
+    pub fn wire_type(&self) -> u16 {
+        self.ty
+    }
+
+    /// Original payload bytes.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
 /// A message body using the registry proposed by this experiment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -43,6 +62,8 @@ pub enum Body {
     Block(Vec<u8>),
     /// A proof that a block is valid.
     ValidityProof(Vec<u8>),
+    /// An unassigned odd type preserved for transparent relay.
+    Unknown(UnknownBody),
 }
 
 impl Body {
@@ -55,6 +76,7 @@ impl Body {
             Body::ListenAdvertisement(_) => TYPE_LISTEN_ADVERTISEMENT,
             Body::Block(_) => TYPE_BLOCK,
             Body::ValidityProof(_) => TYPE_VALIDITY_PROOF,
+            Body::Unknown(body) => body.wire_type(),
         }
     }
 
@@ -67,6 +89,7 @@ impl Body {
             | Body::ListenAdvertisement(p)
             | Body::Block(p)
             | Body::ValidityProof(p) => p,
+            Body::Unknown(body) => body.payload(),
         }
     }
 
@@ -79,7 +102,7 @@ impl Body {
             TYPE_LISTEN_ADVERTISEMENT => Ok(Body::ListenAdvertisement(payload)),
             TYPE_BLOCK => Ok(Body::Block(payload)),
             TYPE_VALIDITY_PROOF => Ok(Body::ValidityProof(payload)),
-            odd if odd % 2 == 1 => Err(DecodeError::UnknownIgnorableMessageType { ty: odd }),
+            odd if odd % 2 == 1 => Ok(Body::Unknown(UnknownBody { ty: odd, payload })),
             even => Err(DecodeError::UnknownRequiredMessageType { ty: even }),
         }
     }
@@ -140,10 +163,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_types_separate_the_ignorable_from_the_rest() {
+    fn unknown_odd_types_are_preserved_and_unknown_even_types_fail() {
         assert_eq!(
             Body::from_wire_type(1001, Vec::new()),
-            Err(DecodeError::UnknownIgnorableMessageType { ty: 1001 })
+            Ok(Body::Unknown(UnknownBody {
+                ty: 1001,
+                payload: Vec::new(),
+            }))
         );
         assert_eq!(
             Body::from_wire_type(1000, Vec::new()),
