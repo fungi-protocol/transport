@@ -1414,6 +1414,7 @@ dependencies = [
  "fungi-transport",
  "fungi-wire",
  "futures",
+ "hex",
  "tokio",
  "tokio-util",
 ]

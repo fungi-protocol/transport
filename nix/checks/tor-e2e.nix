@@ -226,22 +226,43 @@
           peer_socks2.wait_for_unit("tor.service")
           peer_socks2.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
           peer_arti.succeed(
-              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-gossip --virt-port 9736 --listen-peers 2 --message from-b --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-gossip --virt-port 9736 --listen-peers 2 --message-type psbt --message from-b --extension 1:optional --duplicate --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_arti.wait_until_succeeds("grep -q READY /tmp/gossip.log", timeout=600)
           gossip_onion = peer_arti.succeed("grep ONION= /tmp/gossip.log").strip().split("=", 1)[1]
           # Same onion-settling pause as the dial steps above.
           peer_arti.sleep(90)
-          for node, own in [(peer_socks, "from-a"), (peer_socks2, "from-c")]:
+          for node, kind, own in [
+              (peer_socks, "payment", "from-a"),
+              (peer_socks2, "confirmation", "from-c"),
+          ]:
               node.succeed(
-                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
           try:
               for node in [peer_socks, peer_socks2, peer_arti]:
                   node.wait_until_succeeds("grep -qx OK /tmp/gossip.log", timeout=900)
-              for node in [peer_socks, peer_socks2, peer_arti]:
-                  got = sorted(node.succeed("grep '^MSG=' /tmp/gossip.log").split())
-                  assert got == ["MSG=from-a", "MSG=from-b", "MSG=from-c"], f"set mismatch on {node.name}: {got}"
+              nodes = [peer_socks, peer_socks2, peer_arti]
+              message_sets = []
+              commitments = []
+              for node in nodes:
+                  messages = sorted(node.succeed("grep '^MSG=' /tmp/gossip.log").split())
+                  assert len(messages) == 3, f"message count mismatch on {node.name}: {messages}"
+                  assert node.succeed("grep '^COUNT=' /tmp/gossip.log").strip() == "COUNT=3"
+                  commitment = node.succeed("grep '^COMMITMENT=' /tmp/gossip.log").strip()
+                  assert len(commitment) == len("COMMITMENT=") + 64, commitment
+                  for message in messages:
+                      identity, encoded = message.removeprefix("MSG=").split(":", 1)
+                      assert len(identity) == 64, message
+                      assert encoded in [
+                          "00010666726f6d2d6201086f7074696f6e616c",
+                          "00030666726f6d2d61",
+                          "00050666726f6d2d63",
+                      ], message
+                  message_sets.append(messages)
+                  commitments.append(commitment)
+              assert message_sets[0] == message_sets[1] == message_sets[2], message_sets
+              assert commitments[0] == commitments[1] == commitments[2], commitments
           finally:
               # On failure the harness's stderr (dial retries, transport
               # errors) is the only record of what each gossip node saw;

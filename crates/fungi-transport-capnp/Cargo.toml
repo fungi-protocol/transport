@@ -17,10 +17,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", 
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 fungi-transport = { path = "../fungi-transport" }
+fungi-wire = { path = "../fungi-wire" }
+hex = "0.4"
 
 [build-dependencies]
 capnpc = "0.21"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time", "rt-multi-thread"] }
-fungi-wire = { path = "../fungi-wire" }

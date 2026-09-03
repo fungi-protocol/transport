@@ -11,6 +11,7 @@ use fungi_transport::{
     BroadcastChannel, Connector, DialRetry, GossipBroadcast, ListenParams, ListenSide, Listener,
     OnionAddr, SessionId, SplitChannel, Transport, WireConfig, Wiring,
 };
+use fungi_wire::{Body, CanonicalMessage, Extension, Extensions, Message, MessageSet};
 
 /// Bounded wait for every network step: the VM test must fail, not hang.
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -51,8 +52,10 @@ pub(crate) enum Cmd {
         listen_peers: u16,
         /// Outbound links to open, each with its own in-command retry.
         dials: Vec<OnionAddr>,
-        /// This node's own message.
-        message: Vec<u8>,
+        /// This node's own canonical application message.
+        message: CanonicalMessage,
+        /// Publish the same event twice to exercise idempotent insertion.
+        duplicate: bool,
         /// Distinct messages (own included) that mean convergence. Every
         /// participant in one run must use the same total.
         expect: usize,
@@ -71,6 +74,9 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut peers = None;
     let mut dials = Vec::new();
     let mut message = None;
+    let mut message_type = None;
+    let mut extensions = Vec::new();
+    let mut duplicate = false;
     let mut expect = None;
     let mut listen_peers = None;
     while let Some(arg) = it.next() {
@@ -125,6 +131,20 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 )
             }
             "--message" => message = Some(it.next().ok_or("--message needs text")?.into_bytes()),
+            "--message-type" => {
+                message_type = Some(it.next().ok_or("--message-type needs a kind")?)
+            }
+            "--extension" => {
+                let raw = it.next().ok_or("--extension needs TYPE:VALUE")?;
+                let (ty, value) = raw.split_once(':').ok_or("--extension needs TYPE:VALUE")?;
+                extensions.push(Extension {
+                    ty: ty
+                        .parse::<u64>()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                    value: value.as_bytes().to_vec(),
+                });
+            }
+            "--duplicate" => duplicate = true,
             "--expect" => {
                 expect = Some(
                     it.next()
@@ -157,13 +177,28 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
             target: target.ok_or("dial needs a host:port target")?,
             session,
         },
-        "gossip" => Cmd::Gossip {
-            virt_port,
-            listen_peers: listen_peers.unwrap_or(0),
-            dials,
-            message: message.ok_or("gossip needs --message")?,
-            expect: expect.ok_or("gossip needs --expect")?,
-        },
+        "gossip" => {
+            let payload = message.ok_or("gossip needs --message")?;
+            let body = match message_type.as_deref() {
+                Some("psbt") => Body::Psbt(payload),
+                Some("payment") => Body::Payment(payload),
+                Some("confirmation") => Body::Confirmation(payload),
+                Some(other) => return Err(format!("unknown --message-type {other}")),
+                None => return Err("gossip needs --message-type".to_string()),
+            };
+            Cmd::Gossip {
+                virt_port,
+                listen_peers: listen_peers.unwrap_or(0),
+                dials,
+                message: CanonicalMessage::encode(&Message {
+                    body,
+                    extensions: Extensions::new(extensions).map_err(|e| e.to_string())?,
+                })
+                .map_err(|e| e.to_string())?,
+                duplicate,
+                expect: expect.ok_or("gossip needs --expect")?,
+            }
+        }
         other => return Err(format!("unknown subcommand {other}")),
     };
     Ok(Cli {
@@ -230,7 +265,8 @@ pub(crate) async fn run_gossip<T>(
     virt_port: Option<u16>,
     listen_peers: u16,
     dials: &[T::Addr],
-    message: Vec<u8>,
+    message: CanonicalMessage,
+    duplicate: bool,
     expect: usize,
 ) -> Result<(), String>
 where
@@ -283,9 +319,12 @@ where
     .map_err(|e| e.to_string())?;
 
     let mut node = GossipBroadcast::new(channels);
-    let converged = tokio::time::timeout(STEP_TIMEOUT, collect_gossip(&mut node, &message, expect))
-        .await
-        .unwrap_or_else(|_| Err("gossip convergence timed out".to_string()));
+    let converged = tokio::time::timeout(
+        STEP_TIMEOUT,
+        collect_gossip(&mut node, &message, duplicate, expect),
+    )
+    .await
+    .unwrap_or_else(|_| Err("gossip convergence timed out".to_string()));
     // Drain whether or not the set converged. On success this flushes the
     // forwards peers still need — normal peer closure is already tolerated by
     // `shutdown`, so anything left means the convergence proof is incomplete
@@ -298,9 +337,15 @@ where
         (Err(convergence), Err(drain)) => return Err(format!("{convergence}; {drain}")),
         (Err(failure), Ok(())) | (Ok(_), Err(failure)) => return Err(failure),
     };
-    for msg in &set {
-        println!("MSG={}", String::from_utf8_lossy(msg));
+    for (id, message) in set.iter() {
+        println!(
+            "MSG={}:{}",
+            hex::encode(id.as_bytes()),
+            hex::encode(message.as_bytes())
+        );
     }
+    println!("COUNT={}", set.len());
+    println!("COMMITMENT={}", hex::encode(set.commitment().as_bytes()));
     println!("OK");
     Ok(())
 }
@@ -309,16 +354,25 @@ where
 /// harness run. Every participant must use the same `expect` total.
 async fn collect_gossip(
     node: &mut GossipBroadcast,
-    message: &[u8],
+    message: &CanonicalMessage,
+    duplicate: bool,
     expect: usize,
-) -> Result<std::collections::BTreeSet<Vec<u8>>, String> {
-    let mut set = std::collections::BTreeSet::new();
-    set.insert(message.to_vec());
-    node.send(message).await.map_err(|e| e.to_string())?;
+) -> Result<MessageSet, String> {
+    let mut set = MessageSet::default();
+    set.insert(message.clone()).map_err(|e| e.to_string())?;
+    node.send(message.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    if duplicate {
+        node.send(message.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     while set.len() < expect {
         match node.recv().await {
             Ok(msg) => {
-                set.insert(msg);
+                let message = CanonicalMessage::parse(msg).map_err(|e| e.to_string())?;
+                set.insert(message).map_err(|e| e.to_string())?;
             }
             Err(_) => {
                 return Err(format!(
@@ -401,6 +455,7 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
             listen_peers,
             dials,
             message,
+            duplicate,
             expect,
         } => {
             run_gossip(
@@ -409,6 +464,7 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
                 *listen_peers,
                 dials,
                 message.clone(),
+                *duplicate,
                 *expect,
             )
             .await
@@ -550,8 +606,13 @@ mod tests {
                 "9736",
                 "--listen-peers",
                 "2",
+                "--message-type",
+                "psbt",
                 "--message",
                 "from-b",
+                "--extension",
+                "1:optional",
+                "--duplicate",
                 "--expect",
                 "3",
             ]
@@ -565,12 +626,22 @@ mod tests {
                 listen_peers,
                 dials,
                 message,
+                duplicate,
                 expect,
             } => {
                 assert_eq!(virt_port, Some(9736));
                 assert_eq!(listen_peers, 2);
                 assert!(dials.is_empty());
-                assert_eq!(message, b"from-b");
+                let decoded = message.decode();
+                assert_eq!(decoded.body, Body::Psbt(b"from-b".to_vec()));
+                assert_eq!(
+                    decoded.extensions.records(),
+                    &[Extension {
+                        ty: 1,
+                        value: b"optional".to_vec(),
+                    }]
+                );
+                assert!(duplicate);
                 assert_eq!(expect, 3);
             }
             _ => panic!("expected a gossip command"),
@@ -589,6 +660,8 @@ mod tests {
                 "/nix/store/xxx/bin/fungi-socks5h-plugin",
                 "--dial",
                 &onion,
+                "--message-type",
+                "payment",
                 "--message",
                 "from-a",
                 "--expect",
@@ -691,24 +764,27 @@ mod tests {
         });
         let conn_a = transport.connector();
         let conn_c = transport.connector();
-        let b = tokio::spawn(run_gossip(
-            transport,
-            Some(1),
-            2,
-            &[],
-            b"from-b".to_vec(),
-            3,
-        ));
-        let dial_gossip = |conn: fungi_transport::mem::MemConnector, own: &'static [u8]| async move {
+        let encode = |body| CanonicalMessage::encode(&Message::new(body)).unwrap();
+        let b_message = CanonicalMessage::encode(&Message {
+            body: Body::Psbt(b"from-b".to_vec()),
+            extensions: Extensions::new(vec![Extension {
+                ty: 1,
+                value: b"optional".to_vec(),
+            }])
+            .unwrap(),
+        })
+        .unwrap();
+        let b = tokio::spawn(run_gossip(transport, Some(1), 2, &[], b_message, true, 3));
+        let dial_gossip = |conn: fungi_transport::mem::MemConnector, message: CanonicalMessage| async move {
             let ch = conn.connect(&MemAddr).await.unwrap();
             let mut node = GossipBroadcast::new(vec![ch]);
-            let set = collect_gossip(&mut node, own, 3).await.unwrap();
+            let set = collect_gossip(&mut node, &message, false, 3).await.unwrap();
             node.shutdown().await.unwrap();
             set
         };
         let (sa, sc) = tokio::join!(
-            dial_gossip(conn_a, b"from-a"),
-            dial_gossip(conn_c, b"from-c")
+            dial_gossip(conn_a, encode(Body::Payment(b"from-a".to_vec()))),
+            dial_gossip(conn_c, encode(Body::Confirmation(b"from-c".to_vec())))
         );
         b.await.unwrap().unwrap();
         assert_eq!(sa, sc);
