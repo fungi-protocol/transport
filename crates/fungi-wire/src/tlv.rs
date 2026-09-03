@@ -66,7 +66,7 @@ impl TlvStream {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn record(ty: u64, value: &[u8]) -> TlvRecord {
@@ -127,7 +127,7 @@ mod tests {
         );
     }
 
-    mod properties {
+    pub(crate) mod properties {
         use super::*;
         use proptest::prelude::*;
 

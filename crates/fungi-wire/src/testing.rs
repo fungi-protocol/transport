@@ -33,7 +33,7 @@ pub(crate) fn sample_stream(seed: u64) -> TlvStream {
     let count = seed % 3;
     let records = (0..count)
         .map(|i| TlvRecord {
-            ty: 2 * i + 1 + (seed % 7),
+            ty: 2 * i + 1001 + 2 * (seed % 7),
             value: vec![(seed >> (8 * i)) as u8; (seed as usize >> 3) % 5],
         })
         .collect::<Vec<_>>();
@@ -72,4 +72,60 @@ pub(crate) fn count_accepted(
         }
     }
     reached
+}
+
+use crate::encoding::Encoding;
+use crate::message::{Body, Message};
+use proptest::prelude::Strategy;
+
+/// Messages every candidate encoding can represent: extension types are
+/// odd and above every reserved range, so no candidate rejects them and
+/// all three are compared over one domain. The reserved-type behaviour is
+/// asserted separately, per encoding, where it differs.
+pub(crate) fn any_encodable_message() -> impl Strategy<Value = Message> {
+    use proptest::prelude::*;
+    let bodies = proptest::collection::vec(any::<u8>(), 0..64).prop_flat_map(|p| {
+        prop_oneof![
+            Just(Body::Psbt(p.clone())),
+            Just(Body::Payment(p.clone())),
+            Just(Body::Confirmation(p.clone())),
+            Just(Body::ListenAdvertisement(p.clone())),
+            Just(Body::Block(p.clone())),
+            Just(Body::ValidityProof(p)),
+        ]
+    });
+    (
+        bodies,
+        crate::tlv::tests::properties::any_stream((0u64..500).prop_map(|n| n * 2 + 1001)),
+    )
+        .prop_map(|(body, extensions)| Message { body, extensions })
+}
+
+/// A valid encoding of a message, under one mutation.
+pub(crate) fn mutated_encoding<E: Encoding>() -> impl Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    (any_encodable_message(), any::<usize>(), any::<u8>(), 0u8..3).prop_map(
+        |(msg, idx, val, kind)| {
+            let bytes = E::encode(&msg).expect("generated messages are encodable");
+            mutate(bytes, idx, val, kind)
+        },
+    )
+}
+
+/// A small deterministic message derived from `seed`, for the
+/// non-vacuity counters, which must not depend on proptest.
+pub(crate) fn sample_message(seed: u64) -> Message {
+    let payload = vec![seed as u8; (seed as usize) % 8];
+    let body = match seed % 6 {
+        0 => Body::Psbt(payload),
+        1 => Body::Payment(payload),
+        2 => Body::Confirmation(payload),
+        3 => Body::ListenAdvertisement(payload),
+        4 => Body::Block(payload),
+        _ => Body::ValidityProof(payload),
+    };
+    Message {
+        body,
+        extensions: sample_stream(seed),
+    }
 }
