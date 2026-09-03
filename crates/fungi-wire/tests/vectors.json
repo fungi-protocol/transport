@@ -1,0 +1,72 @@
+{
+  "messages": [
+    {
+      "name": "empty PSBT fragment",
+      "canonical": "000100",
+      "message_id": "3c889e860c110e6c0dffdef041bd6aaea54c679c67254369bd4f6c327b5ebe48"
+    },
+    {
+      "name": "hello payment",
+      "canonical": "00030568656c6c6f",
+      "message_id": "b07b1a6952660c8d133472485c1d7dc237dd9e379fa653bfea728bea3283c1ff"
+    },
+    {
+      "name": "one-byte confirmation",
+      "canonical": "000501ff",
+      "message_id": "7695255c60f36dc014084b468b7839f77fce41412140efdfde51ca2c8fbecd79"
+    },
+    {
+      "name": "payment with odd extension",
+      "canonical": "00030178010165",
+      "message_id": "72f6feb658e02f30f9adcba27c27de47495244202a879ee3ecb9df568468cf2a"
+    },
+    {
+      "name": "unassigned odd message",
+      "canonical": "03e9066f7061717565",
+      "message_id": "2d20271c241dceb82a100ddb1af1a5d7a967a67db9a59c695faec3bba1bc0b83"
+    }
+  ],
+  "commitments": [
+    {
+      "name": "empty set",
+      "messages": [],
+      "commitment": "3335354c30a4852064e5372bfa66a81d8ee2193edcced5a5240302bf828f9f34"
+    },
+    {
+      "name": "hello singleton",
+      "messages": ["00030568656c6c6f"],
+      "commitment": "1761c6636d59a0ed0a8e4c7497d5029e6e3894bf9d620b213b346b4bc6561f8f"
+    },
+    {
+      "name": "hello and world",
+      "messages": ["00030568656c6c6f", "000305776f726c64"],
+      "commitment": "6b1010145e52414f2b5754ef83e9406257b1bf521d21e0957720779485104396"
+    }
+  ],
+  "invalid_messages": [
+    {
+      "name": "unknown even message type",
+      "canonical": "03e8066f7061717565"
+    },
+    {
+      "name": "non-minimal payload length",
+      "canonical": "0003fd000568656c6c6f"
+    },
+    {
+      "name": "truncated payload",
+      "canonical": "00030568656c6c"
+    },
+    {
+      "name": "unknown even extension",
+      "canonical": "0003000200"
+    },
+    {
+      "name": "unordered extensions",
+      "canonical": "00030003000100"
+    },
+    {
+      "name": "duplicate extension",
+      "canonical": "00030001000100"
+    }
+  ]
+}

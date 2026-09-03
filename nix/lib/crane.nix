@@ -21,13 +21,15 @@ let
   # (no [package]), so crane can't infer a name for the dependency and check
   # derivations.
   commonArgs = {
-    # Like cleanCargoSource but also keeps .capnp schema files, which the
-    # transport-capnp crate's build script compiles.
+    # Like cleanCargoSource but also keeps inputs consumed at compile time:
+    # Cap'n Proto schemas and the wire conformance vectors.
     src = pkgs.lib.cleanSourceWith {
       src = ../../.;
       name = "source";
       filter = path: type:
-        (pkgs.lib.hasSuffix ".capnp" path) || (craneLib.filterCargoSources path type);
+        (pkgs.lib.hasSuffix ".capnp" path)
+        || (pkgs.lib.hasSuffix "/crates/fungi-wire/tests/vectors.json" path)
+        || (craneLib.filterCargoSources path type);
     };
     pname = "fungi";
     version = "0.1.0";

@@ -1,90 +1,98 @@
 use crate::*;
 use proptest::prelude::*;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct ConformanceVectors {
+    messages: Vec<MessageVector>,
+    commitments: Vec<CommitmentVector>,
+    invalid_messages: Vec<InvalidMessageVector>,
+}
+
+#[derive(Deserialize)]
+struct MessageVector {
+    name: String,
+    canonical: String,
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+struct CommitmentVector {
+    name: String,
+    messages: Vec<String>,
+    commitment: String,
+}
+
+#[derive(Deserialize)]
+struct InvalidMessageVector {
+    name: String,
+    canonical: String,
+}
+
+fn conformance_vectors() -> ConformanceVectors {
+    serde_json::from_str(include_str!("../tests/vectors.json"))
+        .expect("the checked-in conformance vectors must be valid JSON")
+}
 
 fn canonical(payload: &[u8]) -> CanonicalMessage {
     CanonicalMessage::encode(&Message::new(Body::Payment(payload.to_vec()))).unwrap()
 }
 
 #[test]
-fn candidate_vector_is_byte_exact() {
-    let message = canonical(b"hello");
-    assert_eq!(hex::encode(message.as_bytes()), "00030568656c6c6f");
-    assert_eq!(
-        hex::encode(message.id().as_bytes()),
-        "20dba9357befdae2f09f67ccfa65a124a7bfbc886e05154e9720f799c7c3526e"
-    );
-    assert_eq!(
-        CanonicalMessage::parse(message.as_bytes().to_vec()).unwrap(),
-        message
-    );
-}
+fn language_neutral_conformance_vectors_hold() {
+    let vectors = conformance_vectors();
+    let mut mismatches = Vec::new();
 
-#[test]
-fn every_retained_message_type_has_a_byte_exact_vector() {
-    for (body, expected) in [
-        (Body::Psbt(Vec::new()), "000100"),
-        (Body::Payment(b"hello".to_vec()), "00030568656c6c6f"),
-        (Body::Confirmation(vec![0xff]), "000501ff"),
-    ] {
-        let encoded = CanonicalMessage::encode(&Message::new(body)).unwrap();
-        assert_eq!(hex::encode(encoded.as_bytes()), expected);
+    for vector in vectors.messages {
+        let bytes = hex::decode(&vector.canonical).unwrap();
+        let message = CanonicalMessage::parse(bytes.clone())
+            .unwrap_or_else(|error| panic!("message vector {:?} failed: {error}", vector.name));
         assert_eq!(
-            CanonicalMessage::parse(hex::decode(expected).unwrap()).unwrap(),
-            encoded
+            message.as_bytes(),
+            bytes,
+            "message vector {:?}",
+            vector.name
+        );
+        let actual_id = hex::encode(message.id().as_bytes());
+        if actual_id != vector.message_id {
+            mismatches.push((vector.name.clone(), actual_id, vector.message_id));
+        }
+        assert_eq!(
+            CanonicalMessage::encode(&message.decode()).unwrap(),
+            message,
+            "message vector {:?}",
+            vector.name
         );
     }
-}
-
-#[test]
-fn set_commitment_vector_is_byte_exact_and_order_independent() {
-    let hello = canonical(b"hello");
-    let world = canonical(b"world");
-    assert_eq!(
-        hex::encode(world.id().as_bytes()),
-        "e6164c015528e72e8e5564569117331c072edfdd7b3519d3f115f5c3bc542f6e"
-    );
-    let mut forward = MessageSet::default();
-    forward.insert(hello.clone()).unwrap();
-    forward.insert(world.clone()).unwrap();
-    let mut reverse = MessageSet::default();
-    reverse.insert(world).unwrap();
-    reverse.insert(hello).unwrap();
-    assert_eq!(forward.commitment(), reverse.commitment());
-    assert_eq!(
-        hex::encode(forward.commitment().as_bytes()),
-        "84c1963bb98c0a8f4f60286c489d7fa8d3830e4e8b7d3cb04e875cbe4faca0ec"
-    );
-}
-
-#[test]
-fn empty_and_singleton_commitments_are_byte_exact() {
-    let empty = MessageSet::default();
-    assert_eq!(
-        hex::encode(empty.commitment().as_bytes()),
-        "328cabc016c3f0ffae70d63344b34ec8c07d3facb6bf107056225a77e3e80aa3"
+    assert!(
+        mismatches.is_empty(),
+        "message ID mismatches: {mismatches:#?}"
     );
 
-    let mut singleton = MessageSet::default();
-    singleton.insert(canonical(b"hello")).unwrap();
-    assert_eq!(
-        hex::encode(singleton.commitment().as_bytes()),
-        "9d01f77bdc3af2e60e78fd3f9945e289bdd627e0a949f7c9316cb0c7a40f4371"
+    let mut commitment_mismatches = Vec::new();
+    for vector in vectors.commitments {
+        let mut set = MessageSet::default();
+        for message in vector.messages {
+            set.insert(CanonicalMessage::parse(hex::decode(message).unwrap()).unwrap())
+                .unwrap();
+        }
+        let actual = hex::encode(set.commitment().as_bytes());
+        if actual != vector.commitment {
+            commitment_mismatches.push((vector.name, actual, vector.commitment));
+        }
+    }
+    assert!(
+        commitment_mismatches.is_empty(),
+        "set commitment mismatches: {commitment_mismatches:#?}"
     );
-}
 
-#[test]
-fn extension_message_vector_is_byte_exact() {
-    let message = Message {
-        body: Body::Payment(b"x".to_vec()),
-        extensions: Extensions::new(vec![Extension {
-            ty: 1,
-            value: b"e".to_vec(),
-        }])
-        .unwrap(),
-    };
-    let canonical = CanonicalMessage::encode(&message).unwrap();
-    assert_eq!(hex::encode(canonical.as_bytes()), "00030178010165");
-    assert_eq!(canonical.decode(), message);
+    for vector in vectors.invalid_messages {
+        assert!(
+            CanonicalMessage::parse(hex::decode(&vector.canonical).unwrap()).is_err(),
+            "invalid vector {:?} was accepted",
+            vector.name
+        );
+    }
 }
 
 #[test]

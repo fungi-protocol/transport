@@ -1436,6 +1436,8 @@ dependencies = [
  "fungi-transport",
  "hex",
  "proptest",
+ "serde",
+ "serde_json",
  "sha2",
  "tokio",
 ]
