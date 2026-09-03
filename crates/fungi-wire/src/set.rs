@@ -71,11 +71,8 @@ impl MessageSet {
     }
 }
 
-// The lattice crate is a dev-dependency: the laws are worth checking
-// where the lattice is consumed, but the experiment must not make the
-// application crate a runtime dependency of the wire format.
 #[cfg(test)]
-impl concurrent_psbt::Join for MessageSet {
+impl crate::testing::Join for MessageSet {
     fn join(mut self, other: Self) -> Self {
         self.merge(other);
         self
@@ -87,7 +84,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::encoding::{Encoding, HeaderTlv};
     use crate::message::{Body, Message};
-    use concurrent_psbt::Join;
+    use crate::testing::Join;
     use proptest::prelude::*;
 
     pub(crate) fn set_of(payloads: &[&[u8]]) -> MessageSet {
@@ -159,10 +156,30 @@ pub(crate) mod tests {
             )
         }
 
-        concurrent_psbt::assert_join_laws!(any_message_set());
-
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn idempotent(a in any_message_set()) {
+                prop_assert_eq!(a.clone().join(a.clone()), a);
+            }
+
+            #[test]
+            fn commutative(a in any_message_set(), b in any_message_set()) {
+                prop_assert_eq!(a.clone().join(b.clone()), b.join(a));
+            }
+
+            #[test]
+            fn associative(
+                a in any_message_set(),
+                b in any_message_set(),
+                c in any_message_set(),
+            ) {
+                prop_assert_eq!(
+                    a.clone().join(b.clone()).join(c.clone()),
+                    a.join(b.join(c)),
+                );
+            }
 
             /// Equal sets commit equally, however they were built.
             #[test]

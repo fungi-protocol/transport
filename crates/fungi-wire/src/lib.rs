@@ -45,26 +45,3 @@ pub use message::{
 };
 pub use set::MessageSet;
 pub use tlv::{TlvRecord, TlvStream};
-
-#[cfg(test)]
-mod smoke {
-    use concurrent_psbt::Join;
-    use proptest::prelude::*;
-
-    /// A set under union: the shape every message set here has.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct U8Set(std::collections::BTreeSet<u8>);
-
-    impl Join for U8Set {
-        fn join(mut self, other: Self) -> Self {
-            self.0.extend(other.0);
-            self
-        }
-    }
-
-    fn any_set() -> impl Strategy<Value = U8Set> {
-        proptest::collection::btree_set(any::<u8>(), 0..8).prop_map(U8Set)
-    }
-
-    concurrent_psbt::assert_join_laws!(any_set());
-}

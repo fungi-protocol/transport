@@ -6,11 +6,10 @@
 //! Appendix B (TLV streams). Kept in one module so the fixtures can be
 //! read against their published source without reading the codecs.
 //!
-//! Appendix C (message extension, i.e. the `init` message's odd/even
-//! rule at the message layer) and Appendix D (signed integers) are out
-//! of scope: this crate has no message layer yet and no signed-integer
-//! codec, so there is nothing in this crate for those appendices to
-//! exercise.
+//! Appendix C's generic odd/even extension behavior is exercised at the
+//! message layer below. Its `init` payload vectors and Appendix D's signed
+//! integers remain inapplicable because this crate implements neither the
+//! Lightning `init` message nor a signed-integer codec.
 
 #[cfg(test)]
 mod tests {

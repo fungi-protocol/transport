@@ -78,6 +78,12 @@ use crate::encoding::Encoding;
 use crate::message::{Body, Message};
 use proptest::prelude::Strategy;
 
+/// Test-only join operation used to check semilattice laws without coupling
+/// this experiment to an application crate.
+pub(crate) trait Join: Sized {
+    fn join(self, other: Self) -> Self;
+}
+
 /// Messages every candidate encoding can represent: extension types are
 /// odd and above every reserved range, so no candidate rejects them and
 /// all four are compared over one domain. The reserved-type behaviour is

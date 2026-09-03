@@ -73,7 +73,7 @@ pub struct AppState {
 }
 
 #[cfg(test)]
-impl concurrent_psbt::Join for AppState {
+impl crate::testing::Join for AppState {
     fn join(mut self, other: Self) -> Self {
         self.payloads.extend(other.payloads);
         self.highest_confirmation = self.highest_confirmation.max(other.highest_confirmation);
@@ -111,8 +111,8 @@ mod tests {
     use crate::encoding::HeaderTlv;
     use crate::message::Message;
     use crate::set::tests::set_of;
+    use crate::testing::Join;
     use crate::tlv::{TlvRecord, TlvStream};
-    use concurrent_psbt::Join;
     use proptest::prelude::*;
 
     /// A fold that is NOT a homomorphism, kept so the passing property is
