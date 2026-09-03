@@ -1,0 +1,16 @@
+[package]
+name = "fungi-wire"
+description = "Canonical typed messages and grow-only message sets for Fungi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1"
+
+[lints]
+workspace = true

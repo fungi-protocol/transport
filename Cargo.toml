@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fungi-wire",
     "crates/fungi-transport",
     "crates/fungi-transport-capnp",
     "crates/fungi-transport-socks5h",
