@@ -32,6 +32,30 @@ impl Encoding for DeterministicCbor {
         Ok(out)
     }
 
+    fn encoded_len(msg: &Message) -> Result<usize, EncodeError> {
+        let payload_len = msg.body.payload().len();
+        let payload_u64 = u64::try_from(payload_len).map_err(|_| EncodeError::LengthOverflow)?;
+        let extension_count = u64::try_from(msg.extensions.records().len())
+            .map_err(|_| EncodeError::LengthOverflow)?;
+        let mut total = 4usize
+            .checked_add(head_len(u64::from(msg.body.wire_type())))
+            .and_then(|n| n.checked_add(head_len(payload_u64)))
+            .and_then(|n| n.checked_add(payload_len))
+            .and_then(|n| n.checked_add(head_len(extension_count)))
+            .ok_or(EncodeError::LengthOverflow)?;
+        for record in msg.extensions.records() {
+            let value_len =
+                u64::try_from(record.value.len()).map_err(|_| EncodeError::LengthOverflow)?;
+            total = total
+                .checked_add(1)
+                .and_then(|n| n.checked_add(head_len(record.ty)))
+                .and_then(|n| n.checked_add(head_len(value_len)))
+                .and_then(|n| n.checked_add(record.value.len()))
+                .ok_or(EncodeError::LengthOverflow)?;
+        }
+        Ok(total)
+    }
+
     fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
         let mut input = Input::new(bytes);
         input.exact(5, 3)?;
@@ -87,6 +111,16 @@ fn head(major: u8, value: u64, out: &mut Vec<u8>) {
             out.push(prefix | 27);
             out.extend_from_slice(&value.to_be_bytes());
         }
+    }
+}
+
+const fn head_len(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
     }
 }
 

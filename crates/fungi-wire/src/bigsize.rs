@@ -7,6 +7,16 @@
 
 use crate::error::DecodeError;
 
+/// Number of bytes in the minimal encoding of `value`.
+pub const fn encoded_len(value: u64) -> usize {
+    match value {
+        0..=0xfc => 1,
+        0xfd..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
 /// Append the minimal encoding of `value`.
 pub fn encode(value: u64, out: &mut Vec<u8>) {
     if value < 0xfd {

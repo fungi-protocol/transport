@@ -1,6 +1,6 @@
 //! Candidate wire encodings.
 //!
-//! Three shapes behind one trait so the cost of each is measured rather
+//! Four shapes behind one trait so the cost of each is measured rather
 //! than argued. All are CANONICAL: decoding rejects any spelling other
 //! than the one encoding would have produced, because normalizing would
 //! give one message two byte strings and identity is a hash of the byte
@@ -70,6 +70,9 @@ pub trait Encoding {
     /// The message's canonical byte string.
     fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError>;
 
+    /// Exact number of bytes [`encode`](Self::encode) will produce.
+    fn encoded_len(msg: &Message) -> Result<usize, EncodeError>;
+
     /// Decode, rejecting any non-canonical spelling.
     fn decode(bytes: &[u8]) -> Result<Message, DecodeError>;
 }
@@ -97,6 +100,16 @@ impl Encoding for HeaderTlv {
         out.extend_from_slice(payload);
         msg.extensions.encode(&mut out);
         Ok(out)
+    }
+
+    fn encoded_len(msg: &Message) -> Result<usize, EncodeError> {
+        let payload_len = msg.body.payload().len();
+        let payload_u64 = u64::try_from(payload_len).map_err(|_| EncodeError::LengthOverflow)?;
+        2usize
+            .checked_add(bigsize::encoded_len(payload_u64))
+            .and_then(|n| n.checked_add(payload_len))
+            .and_then(|n| msg.extensions.encoded_len().ok()?.checked_add(n))
+            .ok_or(EncodeError::LengthOverflow)
     }
 
     fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
@@ -139,14 +152,7 @@ impl Encoding for AllTlv {
     const NAME: &'static str = "all-tlv";
 
     fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError> {
-        if let Some(rec) = msg
-            .extensions
-            .records()
-            .iter()
-            .find(|r| r.ty <= PAYLOAD_RECORD)
-        {
-            return Err(EncodeError::ReservedExtensionType { ty: rec.ty });
-        }
+        reject_reserved_extensions(msg)?;
         let mut out = Vec::new();
         bigsize::encode(KIND_RECORD, &mut out);
         bigsize::encode(KIND_VALUE_LEN, &mut out);
@@ -157,6 +163,17 @@ impl Encoding for AllTlv {
         out.extend_from_slice(payload);
         msg.extensions.encode(&mut out);
         Ok(out)
+    }
+
+    fn encoded_len(msg: &Message) -> Result<usize, EncodeError> {
+        reject_reserved_extensions(msg)?;
+        let payload_len = msg.body.payload().len();
+        let payload_u64 = u64::try_from(payload_len).map_err(|_| EncodeError::LengthOverflow)?;
+        5usize
+            .checked_add(bigsize::encoded_len(payload_u64))
+            .and_then(|n| n.checked_add(payload_len))
+            .and_then(|n| msg.extensions.encoded_len().ok()?.checked_add(n))
+            .ok_or(EncodeError::LengthOverflow)
     }
 
     fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
@@ -222,6 +239,31 @@ impl Encoding for KvPairs {
         Ok(out)
     }
 
+    fn encoded_len(msg: &Message) -> Result<usize, EncodeError> {
+        let payload_len = msg.body.payload().len();
+        let payload_u64 = u64::try_from(payload_len).map_err(|_| EncodeError::LengthOverflow)?;
+        let mut total = 11usize
+            .checked_add(bigsize::encoded_len(payload_u64))
+            .and_then(|n| n.checked_add(payload_len))
+            .ok_or(EncodeError::LengthOverflow)?;
+        for rec in msg.extensions.records() {
+            let type_width = bigsize::encoded_len(rec.ty);
+            let key_len = 1usize
+                .checked_add(type_width)
+                .ok_or(EncodeError::LengthOverflow)?;
+            let key_u64 = u64::try_from(key_len).map_err(|_| EncodeError::LengthOverflow)?;
+            let value_u64 =
+                u64::try_from(rec.value.len()).map_err(|_| EncodeError::LengthOverflow)?;
+            total = total
+                .checked_add(bigsize::encoded_len(key_u64))
+                .and_then(|n| n.checked_add(key_len))
+                .and_then(|n| n.checked_add(bigsize::encoded_len(value_u64)))
+                .and_then(|n| n.checked_add(rec.value.len()))
+                .ok_or(EncodeError::LengthOverflow)?;
+        }
+        Ok(total)
+    }
+
     fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
         let rest = bytes.strip_prefix(KV_MAGIC).ok_or(DecodeError::BadBody)?;
         let ty: [u8; 2] = rest
@@ -277,6 +319,18 @@ fn push_pair(out: &mut Vec<u8>, key: &[u8], value: &[u8]) {
     out.extend_from_slice(key);
     bigsize::encode(value.len() as u64, out);
     out.extend_from_slice(value);
+}
+
+fn reject_reserved_extensions(msg: &Message) -> Result<(), EncodeError> {
+    if let Some(rec) = msg
+        .extensions
+        .records()
+        .iter()
+        .find(|r| r.ty <= PAYLOAD_RECORD)
+    {
+        return Err(EncodeError::ReservedExtensionType { ty: rec.ty });
+    }
+    Ok(())
 }
 
 /// Read one pair, or `None` for the terminating empty key. Returns how
@@ -356,6 +410,31 @@ pub(crate) mod suite {
                 }
 
                 #[test]
+                fn encoded_len_matches_encoding_at_boundaries() {
+                    for payload_len in [0, 23, 24, 252, 253, 255, 256, 65_535, 65_536] {
+                        let msg = Message {
+                            body: Body::Payment(vec![0; payload_len]),
+                            extensions: TlvStream::new(vec![
+                                TlvRecord {
+                                    ty: 1001,
+                                    value: Vec::new(),
+                                },
+                                TlvRecord {
+                                    ty: 1003,
+                                    value: vec![0; 24],
+                                },
+                            ])
+                            .expect("canonical"),
+                        };
+                        assert_eq!(
+                            <Enc as Encoding>::encoded_len(&msg),
+                            <Enc as Encoding>::encode(&msg).map(|bytes| bytes.len()),
+                            "payload length {payload_len}",
+                        );
+                    }
+                }
+
+                #[test]
                 fn an_unknown_even_extension_is_a_hard_failure() {
                     let msg = Message {
                         body: Body::Psbt(b"x".to_vec()),
@@ -420,6 +499,14 @@ pub(crate) mod suite {
                     #[test]
                     fn messages_roundtrip(msg in testing::any_encodable_message()) {
                         prop_assert_eq!(<Enc as Encoding>::decode(&enc(&msg)), Ok(msg));
+                    }
+
+                    #[test]
+                    fn encoded_len_is_exact(msg in testing::any_encodable_message()) {
+                        prop_assert_eq!(
+                            <Enc as Encoding>::encoded_len(&msg),
+                            <Enc as Encoding>::encode(&msg).map(|bytes| bytes.len()),
+                        );
                     }
 
                     /// The direction that matters: no second spelling of a

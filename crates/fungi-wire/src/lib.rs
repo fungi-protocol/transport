@@ -21,6 +21,7 @@ pub mod encoding;
 pub mod error;
 pub mod fold;
 pub mod id;
+pub mod limits;
 pub mod message;
 pub mod set;
 pub mod tlv;
@@ -39,6 +40,7 @@ pub use fold::{AppState, Validity, fold_at};
 pub use id::{
     MESSAGE_ID_TAG, MessageId, SET_COMMITMENT_TAG, SHORT_ID_TAG, ShortId, message_id, short_id,
 };
+pub use limits::{MAX_MESSAGE_SIZE, decode_bounded, encode_bounded};
 pub use message::{
     Body, Message, TYPE_BLOCK, TYPE_CONFIRMATION, TYPE_LISTEN_ADVERTISEMENT, TYPE_PAYMENT,
     TYPE_PSBT, TYPE_VALIDITY_PROOF,

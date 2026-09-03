@@ -8,7 +8,7 @@
 //! holding the same message would disagree about which message it was.
 
 use crate::bigsize;
-use crate::error::DecodeError;
+use crate::error::{DecodeError, EncodeError};
 
 /// One extension record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,19 @@ impl TlvStream {
             bigsize::encode(rec.value.len() as u64, out);
             out.extend_from_slice(&rec.value);
         }
+    }
+
+    /// Exact encoded size of this stream.
+    pub fn encoded_len(&self) -> Result<usize, EncodeError> {
+        self.0.iter().try_fold(0usize, |total, rec| {
+            let value_len =
+                u64::try_from(rec.value.len()).map_err(|_| EncodeError::LengthOverflow)?;
+            total
+                .checked_add(bigsize::encoded_len(rec.ty))
+                .and_then(|n| n.checked_add(bigsize::encoded_len(value_len)))
+                .and_then(|n| n.checked_add(rec.value.len()))
+                .ok_or(EncodeError::LengthOverflow)
+        })
     }
 
     /// Decode a stream that must cover `bytes` exactly.

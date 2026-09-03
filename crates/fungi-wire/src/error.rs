@@ -12,6 +12,13 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecodeError {
+    /// The complete canonical message exceeds the protocol boundary.
+    TooLarge {
+        /// Configured maximum.
+        max: usize,
+        /// Observed byte length.
+        actual: usize,
+    },
     /// The input ended inside a field.
     UnexpectedEof,
     /// An integer was spelled longer than necessary.
@@ -58,6 +65,15 @@ pub enum DecodeError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncodeError {
+    /// Computing the encoded size overflowed the platform's address space.
+    LengthOverflow,
+    /// The complete canonical message exceeds the protocol boundary.
+    TooLarge {
+        /// Configured maximum.
+        max: usize,
+        /// Computed canonical byte length.
+        actual: usize,
+    },
     /// The message carries an extension record whose type this encoding
     /// reserves for its own structure, so the shape cannot represent it.
     ReservedExtensionType {
@@ -69,6 +85,9 @@ pub enum EncodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DecodeError::TooLarge { max, actual } => {
+                write!(f, "message is {actual} bytes, exceeding maximum {max}")
+            }
             DecodeError::UnexpectedEof => f.write_str("input ended inside a field"),
             DecodeError::NonMinimalInteger => f.write_str("integer is not minimally encoded"),
             DecodeError::NonCanonicalTlv => f.write_str("extension stream is not canonical"),
@@ -92,6 +111,10 @@ impl fmt::Display for DecodeError {
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            EncodeError::LengthOverflow => f.write_str("encoded length overflow"),
+            EncodeError::TooLarge { max, actual } => {
+                write!(f, "message is {actual} bytes, exceeding maximum {max}")
+            }
             EncodeError::ReservedExtensionType { ty } => {
                 write!(f, "extension type {ty} is reserved by this encoding")
             }
@@ -108,6 +131,10 @@ mod tests {
 
     #[test]
     fn display_is_actionable() {
+        assert_eq!(
+            EncodeError::LengthOverflow.to_string(),
+            "encoded length overflow"
+        );
         assert_eq!(
             DecodeError::NonMinimalInteger.to_string(),
             "integer is not minimally encoded"
