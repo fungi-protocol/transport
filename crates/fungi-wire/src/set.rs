@@ -1,4 +1,6 @@
-use crate::{CanonicalMessage, IdentityCollision, MessageId, SET_COMMITMENT_TAG, id::tagged_hash};
+use crate::{
+    CanonicalMessage, IdentityCollision, MessageId, MessageSetCommitment, SET_COMMITMENT_TAG,
+};
 use std::collections::BTreeMap;
 
 /// Grow-only set keyed by stable full message identities.
@@ -8,6 +10,14 @@ impl MessageSet {
     /// Insert a validated message; identical insertion is a no-op.
     pub fn insert(&mut self, message: CanonicalMessage) -> Result<MessageId, IdentityCollision> {
         let id = message.id();
+        self.insert_with_id(id, message)
+    }
+
+    fn insert_with_id(
+        &mut self,
+        id: MessageId,
+        message: CanonicalMessage,
+    ) -> Result<MessageId, IdentityCollision> {
         match self.0.get(&id) {
             Some(old) if old != &message => return Err(IdentityCollision { id }),
             Some(_) => return Ok(id),
@@ -16,6 +26,15 @@ impl MessageSet {
             }
         }
         Ok(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_at(
+        &mut self,
+        id: MessageId,
+        message: CanonicalMessage,
+    ) -> Result<MessageId, IdentityCollision> {
+        self.insert_with_id(id, message)
     }
     /// Whether a full identity is present.
     pub fn contains(&self, id: &MessageId) -> bool {
@@ -39,9 +58,12 @@ impl MessageSet {
     }
     /// Merge another grow-only set, rejecting a full-ID collision.
     pub fn merge(&mut self, other: Self) -> Result<(), IdentityCollision> {
-        for (_, message) in other.0 {
-            self.insert(message)?;
+        for (id, message) in &other.0 {
+            if self.0.get(id).is_some_and(|old| old != message) {
+                return Err(IdentityCollision { id: *id });
+            }
         }
+        self.0.extend(other.0);
         Ok(())
     }
     /// Return the checked union of two grow-only sets.
@@ -50,9 +72,12 @@ impl MessageSet {
         Ok(self)
     }
     /// Commit to the sorted full identities and cardinality.
-    pub fn commitment(&self) -> [u8; 32] {
-        let count = (self.0.len() as u64).to_be_bytes();
-        let ids: Vec<u8> = self.0.keys().flatten().copied().collect();
-        tagged_hash(SET_COMMITMENT_TAG, &[&count, &ids])
+    pub fn commitment(&self) -> MessageSetCommitment {
+        let count = u64::try_from(self.0.len())
+            .expect("a materialized MessageSet cannot exceed u64::MAX entries")
+            .to_be_bytes();
+        let parts = std::iter::once(count.as_slice())
+            .chain(self.0.keys().map(|id| id.as_bytes().as_slice()));
+        MessageSetCommitment::from_hash(crate::id::tagged_hash_iter(SET_COMMITMENT_TAG, parts))
     }
 }

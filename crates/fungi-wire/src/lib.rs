@@ -2,6 +2,8 @@
 //!
 //! The transport frame payload is exactly one [`CanonicalMessage`]. Transport
 //! framing is deliberately excluded from both canonical bytes and identity.
+//! Unknown odd message and extension types remain byte-identical so an older
+//! Fungi relay can forward and commit to newer optional application messages.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +19,7 @@ mod tlv;
 
 pub use encoding::{CanonicalMessage, MAX_MESSAGE_SIZE};
 pub use error::{DecodeError, EncodeError, IdentityCollision};
-pub use id::{MESSAGE_ID_TAG, MessageId, SET_COMMITMENT_TAG};
+pub use id::{MESSAGE_ID_TAG, MessageId, MessageSetCommitment, SET_COMMITMENT_TAG};
 pub use message::{Body, Message, TYPE_CONFIRMATION, TYPE_PAYMENT, TYPE_PSBT, UnknownBody};
 pub use set::MessageSet;
 pub use tlv::{Extension, Extensions};

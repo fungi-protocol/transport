@@ -6,6 +6,7 @@ pub const TYPE_PSBT: u16 = 1;
 pub const TYPE_PAYMENT: u16 = 3;
 /// Confirmation message type.
 pub const TYPE_CONFIRMATION: u16 = 5;
+
 /// An unassigned odd message retained for transparent relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownBody {
@@ -78,6 +79,26 @@ impl Message {
         Self {
             body,
             extensions: Extensions::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_registry_is_distinct_and_ignorable() {
+        let bodies = [
+            Body::Psbt(Vec::new()),
+            Body::Payment(Vec::new()),
+            Body::Confirmation(Vec::new()),
+        ];
+        let types: std::collections::BTreeSet<_> = bodies.iter().map(Body::wire_type).collect();
+        assert_eq!(types.len(), bodies.len());
+        assert!(types.iter().all(|ty| ty % 2 == 1));
+        for body in bodies {
+            assert_eq!(Body::decode(body.wire_type(), Vec::new()), Ok(body));
         }
     }
 }

@@ -48,3 +48,61 @@ fn take<const N: usize>(bytes: &[u8]) -> Result<[u8; N], DecodeError> {
         .try_into()
         .map_err(|_| DecodeError::UnexpectedEof)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bolt_one_canonical_vectors_roundtrip() {
+        for (value, encoded) in [
+            (0, "00"),
+            (252, "fc"),
+            (253, "fd00fd"),
+            (65_535, "fdffff"),
+            (65_536, "fe00010000"),
+            (4_294_967_295, "feffffffff"),
+            (4_294_967_296, "ff0000000100000000"),
+            (u64::MAX, "ffffffffffffffffff"),
+        ] {
+            let bytes = hex::decode(encoded).expect("valid fixture hex");
+            let mut out = Vec::new();
+            encode(value, &mut out);
+            assert_eq!(out, bytes, "encoding {value}");
+            assert_eq!(decode(&bytes), Ok((value, bytes.len())), "decoding {value}");
+        }
+    }
+
+    #[test]
+    fn bolt_one_nonminimal_vectors_fail() {
+        for encoded in ["fd00fc", "fe0000ffff", "ff00000000ffffffff"] {
+            assert_eq!(
+                decode(&hex::decode(encoded).expect("valid fixture hex")),
+                Err(DecodeError::NonMinimalInteger),
+                "{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn bolt_one_truncated_vectors_fail() {
+        for encoded in ["", "fd", "fd00", "fe", "feffff", "ff", "ffffffffff"] {
+            assert_eq!(
+                decode(&hex::decode(encoded).expect("valid fixture hex")),
+                Err(DecodeError::UnexpectedEof),
+                "{encoded}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(256))]
+
+        #[test]
+        fn every_value_has_one_roundtripping_spelling(value in proptest::prelude::any::<u64>()) {
+            let mut bytes = Vec::new();
+            encode(value, &mut bytes);
+            proptest::prop_assert_eq!(decode(&bytes), Ok((value, bytes.len())));
+        }
+    }
+}

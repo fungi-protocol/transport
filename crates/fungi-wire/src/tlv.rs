@@ -1,8 +1,5 @@
 use crate::{DecodeError, EncodeError, bigsize};
 
-/// Validity-window extension: two big-endian `u64`s, `[from, until)`.
-pub const EXT_VALIDITY: u64 = 2;
-
 /// One typed extension record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extension {
@@ -16,7 +13,7 @@ pub struct Extension {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Extensions(Vec<Extension>);
 impl Extensions {
-    /// Validate ordering, uniqueness, required types and known schemas.
+    /// Validate ordering, uniqueness, and required types.
     pub fn new(records: Vec<Extension>) -> Result<Self, DecodeError> {
         if records.windows(2).any(|w| w[0].ty >= w[1].ty) {
             return Err(DecodeError::NonCanonicalExtensions);
@@ -61,20 +58,66 @@ impl Extensions {
 }
 fn validate(records: &[Extension]) -> Result<(), DecodeError> {
     for r in records {
-        if r.ty == EXT_VALIDITY {
-            let raw: [u8; 16] = r
-                .value
-                .as_slice()
-                .try_into()
-                .map_err(|_| DecodeError::BadExtensionValue { ty: r.ty })?;
-            if u64::from_be_bytes(raw[..8].try_into().unwrap())
-                > u64::from_be_bytes(raw[8..].try_into().unwrap())
-            {
-                return Err(DecodeError::BadExtensionValue { ty: r.ty });
-            }
-        } else if r.ty % 2 == 0 {
+        if r.ty % 2 == 0 {
             return Err(DecodeError::UnknownRequiredExtension { ty: r.ty });
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bolt_one_unknown_odd_vectors_are_preserved() {
+        for encoded in [
+            "",
+            "2100",
+            "fd020100",
+            "fd00fd00",
+            "fd00ff00",
+            "fe0200000100",
+            "ff020000000000000100",
+        ] {
+            let bytes = hex::decode(encoded).expect("valid fixture hex");
+            let stream = Extensions::decode(&bytes).expect("unknown odd record is optional");
+            let mut out = Vec::new();
+            stream.encode(&mut out);
+            assert_eq!(out, bytes, "{encoded}");
+        }
+    }
+
+    #[test]
+    fn bolt_one_unknown_even_vectors_fail() {
+        for encoded in ["1200", "fd010200", "fe0100000200", "ff010000000000000200"] {
+            assert!(matches!(
+                Extensions::decode(&hex::decode(encoded).expect("valid fixture hex")),
+                Err(DecodeError::UnknownRequiredExtension { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn bolt_one_malformed_stream_vectors_fail() {
+        for encoded in [
+            "fd",
+            "fd01",
+            "fd000100",
+            "fd0101",
+            "0ffd",
+            "0ffd26",
+            "0ffd2602",
+            "0ffd000100",
+            "0208000000000000022601012a",
+            "0208000000000000023102080000000000000451",
+            "1f000f012a",
+            "1f001f012a",
+        ] {
+            assert!(
+                Extensions::decode(&hex::decode(encoded).expect("valid fixture hex")).is_err(),
+                "{encoded}"
+            );
+        }
+    }
 }

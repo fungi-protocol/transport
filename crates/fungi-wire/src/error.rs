@@ -68,7 +68,11 @@ impl fmt::Display for EncodeError {
 }
 impl fmt::Display for IdentityCollision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "different messages share full identity {:02x?}", self.id)
+        write!(f, "different messages share full identity ")?;
+        for byte in self.id.as_bytes() {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 impl Error for DecodeError {}
