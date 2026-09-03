@@ -16,9 +16,9 @@ pub struct MessageSet(BTreeMap<MessageId, Vec<u8>>);
 
 impl MessageSet {
     /// Record a message, returning its identity. Inserting the same bytes
-    /// again is a no-op — the stored value is kept, which is the same
-    /// choice merging makes, and the two agree because identity is a hash
-    /// of the bytes.
+    /// again is a no-op: this keeps the incumbent while merging keeps the
+    /// newcomer, and the two agree anyway because identity is a hash of
+    /// the bytes, so the incumbent and the newcomer are the same bytes.
     pub fn insert(&mut self, bytes: Vec<u8>) -> MessageId {
         let id = message_id(&bytes);
         self.0.entry(id).or_insert(bytes);
@@ -44,9 +44,12 @@ impl MessageSet {
     ///
     /// Identities are fixed width and traversed in order, so the digest
     /// is a function of which messages are present and of nothing else —
-    /// not of when they arrived, nor of how the set was merged. The count
-    /// is committed first so a prefix of one set cannot collide with
-    /// another.
+    /// not of when they arrived, nor of how the set was merged. The fixed
+    /// width is also what makes the concatenation injective on its own:
+    /// no two different sets share a byte string. The count carries no
+    /// share of that and is committed only to keep the property from
+    /// resting on the ids' width alone, which a later variable-width
+    /// component would silently take away.
     pub fn commitment(&self) -> [u8; 32] {
         let count = (self.0.len() as u64).to_be_bytes();
         let ids: Vec<u8> = self.0.keys().flatten().copied().collect();

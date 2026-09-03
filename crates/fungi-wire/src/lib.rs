@@ -30,7 +30,10 @@ mod conformance;
 #[cfg(test)]
 mod testing;
 
-pub use encoding::{EXT_VALIDITY, Encoding, HeaderTlv};
+// All three candidates are re-exported, and the nesting helpers with
+// them. Promoting one shape to the crate root would put a thumb on a
+// scale whose whole purpose is to be read as neutral.
+pub use encoding::{AllTlv, EXT_VALIDITY, Encoding, HeaderTlv, KvPairs, unwrap_block, wrap};
 pub use error::{DecodeError, EncodeError};
 pub use fold::{AppState, Validity, fold_at};
 pub use id::{

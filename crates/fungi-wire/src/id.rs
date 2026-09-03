@@ -32,8 +32,10 @@ pub fn message_id(bytes: &[u8]) -> MessageId {
 ///
 /// Parts are hashed in sequence with no separator, so a caller
 /// passing variable-width parts must frame them itself. Both callers
-/// here do: the identity takes a single part, and the set commitment
-/// commits a count before fixed-width ids.
+/// here avoid needing to: the identity takes a single part, and the set
+/// commitment concatenates ids of a fixed 32 bytes, which is already
+/// unambiguous. The count it commits first is a hedge against a later
+/// variable-width component, not what makes today's concatenation safe.
 pub(crate) fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
     let tag_digest = Sha256::digest(tag.as_bytes());
     let mut hasher = Sha256::new();
