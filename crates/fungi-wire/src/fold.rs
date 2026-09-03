@@ -220,7 +220,7 @@ mod tests {
         ///
         /// Local to this module by necessity. The shared message
         /// generator's extension types are all odd and far above every
-        /// reserved range, because the encoding suite compares three
+        /// reserved range, because the encoding suite compares four
         /// candidates over one domain and the uniform shape reserves
         /// record type 2 — which is exactly `EXT_VALIDITY`. Widening the
         /// shared generator to emit windows would make its messages

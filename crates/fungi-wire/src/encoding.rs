@@ -12,6 +12,9 @@ use crate::fold::Validity;
 use crate::message::{Body, Message};
 use crate::tlv::TlvStream;
 
+mod cbor;
+pub use cbor::DeterministicCbor;
+
 /// The one assigned extension type: a validity window, as two big-endian
 /// u64s. EVEN, therefore mandatory — a node that ignored it would apply a
 /// different replacement rule than its peers and diverge.
@@ -472,6 +475,7 @@ pub(crate) mod suite {
     encoding_suite!(header_tlv, crate::encoding::HeaderTlv);
     encoding_suite!(all_tlv, crate::encoding::AllTlv);
     encoding_suite!(kv_pairs, crate::encoding::KvPairs);
+    encoding_suite!(deterministic_cbor, crate::encoding::DeterministicCbor);
 
     /// Where the two shapes genuinely differ: the uniform stream spends
     /// record types on its own structure, so there are messages it cannot
@@ -551,10 +555,11 @@ pub(crate) mod suite {
 
     #[test]
     fn malformed_validity_records_are_refused_by_every_shape_that_carries_them() {
-        use crate::encoding::{HeaderTlv, KvPairs};
+        use crate::encoding::{DeterministicCbor, HeaderTlv, KvPairs};
 
         a_malformed_validity_record_is_refused::<HeaderTlv>();
         a_malformed_validity_record_is_refused::<KvPairs>();
+        a_malformed_validity_record_is_refused::<DeterministicCbor>();
     }
 
     /// The sharper consequence: `EXT_VALIDITY` is 2, exactly the record

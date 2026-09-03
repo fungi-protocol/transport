@@ -31,7 +31,9 @@ mod conformance;
 mod testing;
 #[cfg(test)]
 mod transport_convergence;
-pub use encoding::{AllTlv, EXT_VALIDITY, Encoding, HeaderTlv, KvPairs, unwrap_block, wrap};
+pub use encoding::{
+    AllTlv, DeterministicCbor, EXT_VALIDITY, Encoding, HeaderTlv, KvPairs, unwrap_block, wrap,
+};
 pub use error::{DecodeError, EncodeError};
 pub use fold::{AppState, Validity, fold_at};
 pub use id::{

@@ -80,7 +80,7 @@ use proptest::prelude::Strategy;
 
 /// Messages every candidate encoding can represent: extension types are
 /// odd and above every reserved range, so no candidate rejects them and
-/// all three are compared over one domain. The reserved-type behaviour is
+/// all four are compared over one domain. The reserved-type behaviour is
 /// asserted separately, per encoding, where it differs.
 pub(crate) fn any_encodable_message() -> impl Strategy<Value = Message> {
     use proptest::prelude::*;

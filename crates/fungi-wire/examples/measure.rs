@@ -9,11 +9,11 @@
 //! Run with:
 //!   cargo run --manifest-path crates/fungi-wire/Cargo.toml --example measure
 
-use fungi_wire::encoding::{AllTlv, Encoding, HeaderTlv, KvPairs, wrap};
+use fungi_wire::encoding::{AllTlv, DeterministicCbor, Encoding, HeaderTlv, KvPairs, wrap};
 use fungi_wire::{Body, EXT_VALIDITY, EncodeError, Message, TlvRecord, TlvStream};
 
-fn sizes(msg: &Message) -> (usize, usize, usize) {
-    // Every message this example builds is representable in all three
+fn sizes(msg: &Message) -> (usize, usize, usize, usize) {
+    // Every message this example builds is representable in all four
     // shapes, so an encode failure is a defect and must be loud rather
     // than silently reported as a zero-length row.
     (
@@ -24,6 +24,9 @@ fn sizes(msg: &Message) -> (usize, usize, usize) {
             .expect("sample messages are encodable")
             .len(),
         KvPairs::encode(msg)
+            .expect("sample messages are encodable")
+            .len(),
+        DeterministicCbor::encode(msg)
             .expect("sample messages are encodable")
             .len(),
     )
@@ -46,13 +49,14 @@ fn wrap_overhead<E: Encoding>(inner: &Message) -> usize {
 }
 
 fn row(name: &str, msg: &Message) {
-    let (h, a, k) = sizes(msg);
+    let (h, a, k, c) = sizes(msg);
     let payload = msg.body.payload().len();
     println!(
-        "{name:<34} {payload:>8} {h:>10} {a:>10} {k:>10}   {:>6} {:>6} {:>6}",
+        "{name:<34} {payload:>8} {h:>10} {a:>10} {k:>10} {c:>18}   {:>6} {:>6} {:>6} {:>6}",
         h - payload,
         a - payload,
-        k - payload
+        k - payload,
+        c - payload
     );
 }
 
@@ -76,7 +80,7 @@ fn with_validity(body: Body) -> Message {
 
 /// A row for a message a shape may be unable to represent at all.
 ///
-/// `sizes` above insists on all three, which is right for the rows it
+/// `sizes` above insists on all four, which is right for the rows it
 /// serves and is exactly why it cannot measure this one: the uniform
 /// shape reserves the record type the protocol's only assigned extension
 /// uses, so for it there is no encoding to report rather than a defect to
@@ -90,17 +94,22 @@ fn ext_row(name: &str, msg: &Message) {
     let (h, ho) = cell(HeaderTlv::encode(msg));
     let (a, ao) = cell(AllTlv::encode(msg));
     let (k, ko) = cell(KvPairs::encode(msg));
-    println!("{name:<34} {payload:>8} {h:>10} {a:>10} {k:>10}   {ho:>6} {ao:>6} {ko:>6}");
+    let (c, co) = cell(DeterministicCbor::encode(msg));
+    println!(
+        "{name:<34} {payload:>8} {h:>10} {a:>10} {k:>10} {c:>18}   {ho:>6} {ao:>6} {ko:>6} {co:>6}"
+    );
 }
 
 fn main() {
     println!(
-        "{:<34} {:>8} {:>10} {:>10} {:>10}   {:>6} {:>6} {:>6}",
+        "{:<34} {:>8} {:>10} {:>10} {:>10} {:>18}   {:>6} {:>6} {:>6} {:>6}",
         "message",
         "payload",
         HeaderTlv::NAME,
         AllTlv::NAME,
         KvPairs::NAME,
+        DeterministicCbor::NAME,
+        "ovh",
         "ovh",
         "ovh",
         "ovh"
@@ -154,12 +163,13 @@ fn main() {
     println!("\n-- nesting: what a Byzantine layer costs --");
     let inner = Message::new(Body::Psbt(vec![0u8; 128]));
     println!(
-        "{:<34} {:>8} {:>10} {:>10} {:>10}",
+        "{:<34} {:>8} {:>10} {:>10} {:>10} {:>18}",
         "block-wrapped psbt (overhead)",
         inner.body.payload().len(),
         wrap_overhead::<HeaderTlv>(&inner),
         wrap_overhead::<AllTlv>(&inner),
         wrap_overhead::<KvPairs>(&inner),
+        wrap_overhead::<DeterministicCbor>(&inner),
     );
 
     println!(
