@@ -75,7 +75,18 @@ impl<C> SessionBoundChannel<C> {
     }
 }
 
+/// A bound channel has earned admission: everything crossing it is checked
+/// against the session contract, in both directions.
+impl<C: SplitChannel> SessionBound for SessionBoundChannel<C> {}
+
 /// Bind one raw P2P channel before admitting application traffic.
+///
+/// Both hellos go out concurrently, so the local session is on the wire before
+/// the peer's has been seen: anyone who completes a transport connection learns
+/// which session this node is constructing. That follows from the identity
+/// being context rather than a credential, and it is why a handshake that ever
+/// has to AUTHENTICATE membership cannot be built by extending this one — it
+/// would have to commit to the secret instead of revealing it.
 ///
 /// There is no internal deadline: a peer that never sends its hello leaves
 /// this pending for as long as the transport keeps the connection open. Bound
@@ -108,6 +119,10 @@ where
 ///
 /// The first failure abandons the rest, so no channel outlives a group that
 /// never formed. Like [`bind`], this imposes no deadline of its own.
+///
+/// Reach for it only when the group is not a [`GossipBroadcast`]: otherwise
+/// [`bind_group`] does the same and applies the negotiated size limit, which
+/// is the step easiest to leave out.
 pub async fn bind_all<C>(
     channels: Vec<C>,
     contract: SessionContract,
@@ -117,10 +132,6 @@ where
 {
     try_join_all(channels.into_iter().map(|channel| bind(channel, contract))).await
 }
-
-/// A bound channel has earned admission: everything crossing it is checked
-/// against the session contract, in both directions.
-impl<C: SplitChannel> SessionBound for SessionBoundChannel<C> {}
 
 /// Bind every link and form the group's gossip node, in one step.
 ///
@@ -139,7 +150,7 @@ where
     Ok(GossipBroadcast::new(channels).with_max_msg_len(contract.max_message_size().get()))
 }
 
-fn validate_application(
+pub(crate) fn validate_application(
     contract: SessionContract,
     bytes: &[u8],
 ) -> Result<(), ApplicationViolation> {

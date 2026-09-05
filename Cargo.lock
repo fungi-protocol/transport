@@ -1384,6 +1384,7 @@ dependencies = [
  "fungi-wire",
  "futures-util",
  "hex",
+ "proptest",
  "tokio",
 ]
 

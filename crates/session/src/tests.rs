@@ -9,8 +9,9 @@ use fungi_wire::{
 
 use crate::{
     MessageSizeLimit, SessionBindingError, SessionBoundChannel, SessionContract, bind, bind_all,
-    hello,
+    channel::validate_application, hello,
 };
+use proptest::prelude::*;
 
 const DEADLINE: Duration = Duration::from_secs(3);
 
@@ -385,4 +386,84 @@ async fn application_traffic_shaped_like_a_hello_is_still_application_traffic() 
 fn a_session_bound_channel_still_implements_split_channel() {
     fn requires_split<T: SplitChannel>() {}
     requires_split::<SessionBoundChannel<MemChannel>>();
+}
+
+fn any_session_id() -> impl Strategy<Value = [u8; 32]> {
+    prop_oneof![
+        any::<[u8; 32]>(),
+        // A session ID opening with the handshake magic is what makes an
+        // application message ambiguous with a hello, and no uniform generator
+        // would ever produce one.
+        any::<[u8; 16]>().prop_map(|tail| {
+            let mut session = [0; 32];
+            session[..hello::HELLO_MAGIC.len()].copy_from_slice(&hello::HELLO_MAGIC);
+            session[hello::HELLO_MAGIC.len()..].copy_from_slice(&tail);
+            session
+        }),
+    ]
+}
+
+fn any_contract() -> impl Strategy<Value = SessionContract> {
+    (
+        any_session_id(),
+        any::<u16>(),
+        1usize..=fungi_wire::MAX_MESSAGE_SIZE,
+    )
+        .prop_map(|(session, version, limit)| {
+            SessionContract::new(
+                MessageContext::new(
+                    ProtocolSessionId::new(session),
+                    ProtocolVersion::new(version),
+                ),
+                MessageSizeLimit::new(limit).unwrap(),
+            )
+        })
+}
+
+/// A contract and one frame a link bound to it plausibly sees. The frame is
+/// drawn AFTER the contract so the admissible case actually occurs — drawing
+/// both independently would only ever produce traffic from other sessions.
+fn contract_and_frame() -> impl Strategy<Value = (SessionContract, Vec<u8>)> {
+    any_contract().prop_flat_map(|contract| {
+        let frame = prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..96),
+            proptest::collection::vec(any::<u8>(), 0..64).prop_map(move |payload| canonical(
+                contract, &payload
+            )
+            .as_bytes()
+            .to_vec()),
+            // 32 + 2 context, 2 type, 1 length: a 17-byte payload lands exactly
+            // on the hello's length, so under a magic-prefixed session this is
+            // admissible traffic wearing the handshake's shape.
+            Just(canonical(contract, &[0; 17]).as_bytes().to_vec()),
+            (
+                any_contract(),
+                proptest::collection::vec(any::<u8>(), 0..64)
+            )
+                .prop_map(|(other, payload)| canonical(other, &payload).as_bytes().to_vec()),
+            Just(hello::encode(contract).to_vec()),
+        ];
+        (Just(contract), frame)
+    })
+}
+
+proptest! {
+    /// The handshake survives every contract it can carry, so a peer is never
+    /// refused for a session, version or limit the encoding cannot express.
+    #[test]
+    fn a_hello_roundtrips_for_any_contract(expected in any_contract()) {
+        prop_assert_eq!(hello::decode(&hello::encode(expected)).unwrap(), expected);
+    }
+
+    /// Admission is exactly canonical traffic committed to the bound context —
+    /// no more, and no less. Nothing else is admitted, and nothing that is
+    /// admissible is turned away for looking like something else.
+    #[test]
+    fn admission_is_exactly_canonical_traffic_for_the_bound_context(
+        (contract, frame) in contract_and_frame(),
+    ) {
+        let admissible = fungi_wire::CanonicalMessage::validate(&frame)
+            .is_ok_and(|context| context == contract.context());
+        prop_assert_eq!(validate_application(contract, &frame).is_ok(), admissible);
+    }
 }
