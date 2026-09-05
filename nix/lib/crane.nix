@@ -28,7 +28,7 @@ let
       name = "source";
       filter = path: type:
         (pkgs.lib.hasSuffix ".capnp" path)
-        || (pkgs.lib.hasSuffix "/crates/fungi-wire/tests/vectors.json" path)
+        || (pkgs.lib.hasSuffix "/crates/wire/tests/vectors.json" path)
         || (craneLib.filterCargoSources path type);
     };
     pname = "fungi";

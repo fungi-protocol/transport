@@ -1,0 +1,27 @@
+[package]
+name = "fungi-transport-capnp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+capnp = "0.21"
+capnp-rpc = "0.21"
+# `rt-multi-thread`/`time` are for the `harness` binary (the VM test driver):
+# a multi-thread runtime for `#[tokio::main]` and `timeout` for its step
+# bounds. The library itself needs only the current-thread pieces.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-util", "io-std", "net", "process", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+fungi-transport = { path = "../transport" }
+fungi-wire = { path = "../wire" }
+hex = "0.4"
+
+[build-dependencies]
+capnpc = "0.21"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time", "rt-multi-thread"] }

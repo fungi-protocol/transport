@@ -184,7 +184,7 @@
           peer_socks.execute("pkill -f 'harness listen' || true")
 
           # The listener must outlive its first peer: it serves the default
-          # dial below plus the two session dials after it, sequentially.
+          # dial below plus the two isolated dials after it, sequentially.
           peer_arti.succeed(
               f"({e2e} listen --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-listen --virt-port 9735 --peers 3 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
           )
@@ -195,7 +195,7 @@
           peer_arti.sleep(90)
           peer_socks.wait_until_succeeds(f"{e2e} dial --plugin {socks5h_plugin} {onion2}", timeout=900)
 
-          # The session id's text form is the SOCKS username, and the daemon
+          # The circuit-isolation id's text form is the SOCKS username, and the daemon
           # (IsolateSOCKSAuth, on by default) must keep distinct credentials
           # on distinct circuits. circuit-status reports each circuit's
           # SOCKS_USERNAME, and circuits outlive their streams, so the
@@ -205,15 +205,15 @@
           # token-wiring tests.
           for sess in ["4242-1", "4242-2"]:
               peer_socks.wait_until_succeeds(
-                  f"{e2e} dial --plugin {socks5h_plugin} --session {sess} {onion2}", timeout=300
+                  f"{e2e} dial --plugin {socks5h_plugin} --circuit-isolation {sess} {onion2}", timeout=300
               )
           status = peer_socks.succeed(
               "printf 'AUTHENTICATE\\r\\nGETINFO circuit-status\\r\\nQUIT\\r\\n' | nc -w 5 127.0.0.1 9051"
           )
-          assert 'SOCKS_USERNAME="4242-1"' in status, f"no circuit for session 4242-1:\n{status}"
-          assert 'SOCKS_USERNAME="4242-2"' in status, f"no circuit for session 4242-2:\n{status}"
+          assert 'SOCKS_USERNAME="4242-1"' in status, f"no circuit for isolation group 4242-1:\n{status}"
+          assert 'SOCKS_USERNAME="4242-2"' in status, f"no circuit for isolation group 4242-2:\n{status}"
           for line in status.splitlines():
-              assert not ("4242-1" in line and "4242-2" in line), f"sessions share a circuit:\n{line}"
+              assert not ("4242-1" in line and "4242-2" in line), f"isolation groups share a circuit:\n{line}"
 
           # As with the socks5h listener above: the dialer's OK is the proof, so
           # the arti echo listener need not exit cleanly. Record its log, stop it.

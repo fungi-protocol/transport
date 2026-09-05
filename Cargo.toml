@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/fungi-wire",
-    "crates/fungi-transport",
-    "crates/fungi-transport-capnp",
-    "crates/fungi-transport-socks5h",
-    "crates/fungi-transport-arti",
+    "crates/wire",
+    "crates/transport",
+    "crates/transport-capnp",
+    "crates/transport-socks5h",
+    "crates/transport-arti",
 ]
 
 [workspace.package]
