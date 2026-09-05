@@ -11,7 +11,14 @@ use fungi_transport::{
     BroadcastChannel, CircuitIsolationId, Connector, DialRetry, GossipBroadcast, ListenParams,
     ListenSide, Listener, OnionAddr, SplitChannel, Transport, WireConfig, Wiring,
 };
-use fungi_wire::{Body, CanonicalMessage, Extension, Extensions, Message, MessageSet};
+use fungi_wire::{
+    Body, CanonicalMessage, Extension, Extensions, Message, MessageContext, MessageSet,
+    ProtocolSessionId, ProtocolVersion,
+};
+
+fn default_message_context() -> MessageContext {
+    MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
+}
 
 /// Bounded wait for every network step: the VM test must fail, not hang.
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -190,10 +197,13 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 virt_port,
                 listen_peers: listen_peers.unwrap_or(0),
                 dials,
-                message: CanonicalMessage::encode(&Message {
-                    body,
-                    extensions: Extensions::new(extensions).map_err(|e| e.to_string())?,
-                })
+                message: CanonicalMessage::encode(
+                    default_message_context(),
+                    &Message {
+                        body,
+                        extensions: Extensions::new(extensions).map_err(|e| e.to_string())?,
+                    },
+                )
                 .map_err(|e| e.to_string())?,
                 duplicate,
                 expect: expect.ok_or("gossip needs --expect")?,
@@ -358,7 +368,7 @@ async fn collect_gossip(
     duplicate: bool,
     expect: usize,
 ) -> Result<MessageSet, String> {
-    let mut set = MessageSet::default();
+    let mut set = MessageSet::new(message.context());
     set.insert(message.clone()).map_err(|e| e.to_string())?;
     node.send(message.as_bytes())
         .await
@@ -771,15 +781,20 @@ mod tests {
         });
         let conn_a = transport.connector();
         let conn_c = transport.connector();
-        let encode = |body| CanonicalMessage::encode(&Message::new(body)).unwrap();
-        let b_message = CanonicalMessage::encode(&Message {
-            body: Body::Psbt(b"from-b".to_vec()),
-            extensions: Extensions::new(vec![Extension {
-                ty: 1,
-                value: b"optional".to_vec(),
-            }])
-            .unwrap(),
-        })
+        let encode = |body| {
+            CanonicalMessage::encode(default_message_context(), &Message::new(body)).unwrap()
+        };
+        let b_message = CanonicalMessage::encode(
+            default_message_context(),
+            &Message {
+                body: Body::Psbt(b"from-b".to_vec()),
+                extensions: Extensions::new(vec![Extension {
+                    ty: 1,
+                    value: b"optional".to_vec(),
+                }])
+                .unwrap(),
+            },
+        )
         .unwrap();
         let b = tokio::spawn(run_gossip(transport, Some(1), 2, &[], b_message, true, 3));
         let dial_gossip = |conn: fungi_transport::mem::MemConnector, message: CanonicalMessage| async move {

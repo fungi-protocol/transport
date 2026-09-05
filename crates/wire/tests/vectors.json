@@ -1,72 +1,127 @@
 {
+  "session_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "protocol_version": 1,
   "messages": [
     {
       "name": "empty PSBT fragment",
-      "canonical": "000100",
-      "message_id": "3c889e860c110e6c0dffdef041bd6aaea54c679c67254369bd4f6c327b5ebe48"
+      "canonical": "00000000000000000000000000000000000000000000000000000000000000000001000100",
+      "message_id": "c035905685135e8adf175d56686fcd2a8e2c9da73cb695953591ea2bb8907c77"
     },
     {
       "name": "hello payment",
-      "canonical": "00030568656c6c6f",
-      "message_id": "b07b1a6952660c8d133472485c1d7dc237dd9e379fa653bfea728bea3283c1ff"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000100030568656c6c6f",
+      "message_id": "c06a6c43363b7b5990335a9013547914154e3fe0697a552e4b101c7d494d7201"
     },
     {
       "name": "one-byte confirmation",
-      "canonical": "000501ff",
-      "message_id": "7695255c60f36dc014084b468b7839f77fce41412140efdfde51ca2c8fbecd79"
+      "canonical": "00000000000000000000000000000000000000000000000000000000000000000001000501ff",
+      "message_id": "8eec6e7015a78c4ebf8b3d8f2af348de0d5e5cd08e98231c1c7166769ad49adb"
     },
     {
       "name": "payment with odd extension",
-      "canonical": "00030178010165",
-      "message_id": "72f6feb658e02f30f9adcba27c27de47495244202a879ee3ecb9df568468cf2a"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000100030178010165",
+      "message_id": "6f5de713948081ab37791c124fa0d299cd8f2d1d2e22da7f6ad5d4939b9aa12a"
     },
     {
       "name": "unassigned odd message",
-      "canonical": "03e9066f7061717565",
-      "message_id": "2d20271c241dceb82a100ddb1af1a5d7a967a67db9a59c695faec3bba1bc0b83"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000103e9066f7061717565",
+      "message_id": "efc0fcad796abffecd9f317fc66d430e63b1b7f92ed2350c2a7c877aca54c845"
+    },
+    {
+      "name": "empty PSBT fragment under a nonzero context",
+      "session_id": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "protocol_version": 258,
+      "canonical": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200102000100",
+      "message_id": "e4924039450d71b47168db05672a0813a4e2b8068f01705b812ffda34929a9cd"
+    },
+    {
+      "name": "payment under a nonzero context",
+      "session_id": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "protocol_version": 258,
+      "canonical": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20010200030568656c6c6f",
+      "message_id": "754d16dbc498d4ef3a0a2a423b268e212f530398194ce71cb336acd911932d43"
+    },
+    {
+      "name": "confirmation under a nonzero context",
+      "session_id": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "protocol_version": 258,
+      "canonical": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200102000501ff",
+      "message_id": "02c7a5b6ec448f1395ab169a84fbd0c8eb89edcbbb80b3eb0d86e24937df8a8e"
     }
   ],
   "commitments": [
     {
       "name": "empty set",
       "messages": [],
-      "commitment": "3335354c30a4852064e5372bfa66a81d8ee2193edcced5a5240302bf828f9f34"
+      "commitment": "2cb482f2d68680acd42bb9a55d5b3ba8dad4a1513c21788d8db73698cbef56e6"
     },
     {
       "name": "hello singleton",
-      "messages": ["00030568656c6c6f"],
-      "commitment": "1761c6636d59a0ed0a8e4c7497d5029e6e3894bf9d620b213b346b4bc6561f8f"
+      "messages": [
+        "0000000000000000000000000000000000000000000000000000000000000000000100030568656c6c6f"
+      ],
+      "commitment": "2ba1333b9e9f6517ae08d48826f4d13266df8f62a5b2b671bd413589860f6096"
     },
     {
       "name": "hello and world",
-      "messages": ["00030568656c6c6f", "000305776f726c64"],
-      "commitment": "6b1010145e52414f2b5754ef83e9406257b1bf521d21e0957720779485104396"
+      "messages": [
+        "0000000000000000000000000000000000000000000000000000000000000000000100030568656c6c6f",
+        "00000000000000000000000000000000000000000000000000000000000000000001000305776f726c64"
+      ],
+      "commitment": "8043d71b08ddf4d5b738917731563cd8b28bbcb10d26a9928f8f7d26e7ca4c78"
+    },
+    {
+      "name": "empty set under a nonzero context",
+      "session_id": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "protocol_version": 258,
+      "messages": [],
+      "commitment": "3ceafdea471c510f717bc2d5c9c3cb326ea1c4d357f5d1afbd89165cc19f8aa7"
+    },
+    {
+      "name": "payment and confirmation under a nonzero context",
+      "session_id": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "protocol_version": 258,
+      "messages": [
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20010200030568656c6c6f",
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200102000501ff"
+      ],
+      "commitment": "82429f53940e0aa40708d383e617c6be21e477d4533faeed39ed7374cbb63637"
     }
   ],
   "invalid_messages": [
     {
       "name": "unknown even message type",
-      "canonical": "03e8066f7061717565"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000103e8066f7061717565"
     },
     {
       "name": "non-minimal payload length",
-      "canonical": "0003fd000568656c6c6f"
+      "canonical": "000000000000000000000000000000000000000000000000000000000000000000010003fd000568656c6c6f"
     },
     {
       "name": "truncated payload",
-      "canonical": "00030568656c6c"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000100030568656c6c"
     },
     {
       "name": "unknown even extension",
-      "canonical": "0003000200"
+      "canonical": "000000000000000000000000000000000000000000000000000000000000000000010003000200"
     },
     {
       "name": "unordered extensions",
-      "canonical": "00030003000100"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000100030003000100"
     },
     {
       "name": "duplicate extension",
-      "canonical": "00030001000100"
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000100030001000100"
+    }
+  ],
+  "foreign_context_messages": [
+    {
+      "name": "another session",
+      "canonical": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20010200030568656c6c6f"
+    },
+    {
+      "name": "same session, another version",
+      "canonical": "0000000000000000000000000000000000000000000000000000000000000000000200030568656c6c6f"
     }
   ]
 }

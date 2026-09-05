@@ -11,11 +11,16 @@ use fungi_transport::testkit;
 use fungi_transport::{Channel, Connector, ListenParams, Listener, Transport};
 use fungi_transport_capnp::{CapnpTransport, connect_plugin};
 use fungi_wire::{
-    Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageSet,
+    Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageContext,
+    MessageSet, ProtocolSessionId, ProtocolVersion,
 };
 
 /// The child plugin binary, built by cargo before this integration test.
 const MEM_PLUGIN: &str = env!("CARGO_BIN_EXE_mem-plugin");
+
+fn context() -> MessageContext {
+    MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
+}
 
 /// Spawn the `mem-plugin` child and connect a `CapnpTransport` to it over the
 /// child's stdio.
@@ -53,24 +58,29 @@ async fn subprocess_typed_messages_converge() {
 
     let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
-    let payment = CanonicalMessage::encode(&Message {
-        body: Body::Payment(b"payment".to_vec()),
-        extensions: Extensions::new(vec![Extension {
-            ty: 1,
-            value: b"optional".to_vec(),
-        }])
-        .unwrap(),
-    })
+    let payment = CanonicalMessage::encode(
+        context(),
+        &Message {
+            body: Body::Payment(b"payment".to_vec()),
+            extensions: Extensions::new(vec![Extension {
+                ty: 1,
+                value: b"optional".to_vec(),
+            }])
+            .unwrap(),
+        },
+    )
     .unwrap();
-    let psbt = CanonicalMessage::encode(&Message::new(Body::Psbt(b"fragment".to_vec()))).unwrap();
-    let boundary = CanonicalMessage::encode(&Message::new(Body::Confirmation(vec![
-        0;
-        MAX_MESSAGE_SIZE
-            - 7
-    ])))
+    let psbt = CanonicalMessage::encode(context(), &Message::new(Body::Psbt(b"fragment".to_vec())))
+        .unwrap();
+    let boundary = CanonicalMessage::encode(
+        context(),
+        &Message::new(Body::Confirmation(vec![0; MAX_MESSAGE_SIZE - 41])),
+    )
     .unwrap();
     assert_eq!(boundary.as_bytes().len(), MAX_MESSAGE_SIZE);
-    let invalid = hex::decode("0003fd000568656c6c6f").unwrap();
+    let mut invalid = vec![0; 32];
+    invalid.extend_from_slice(&1u16.to_be_bytes());
+    invalid.extend_from_slice(&hex::decode("0003fd000568656c6c6f").unwrap());
 
     client.send(payment.as_bytes()).await.unwrap();
     client.send(payment.as_bytes()).await.unwrap();
@@ -78,7 +88,7 @@ async fn subprocess_typed_messages_converge() {
     server.send(psbt.as_bytes()).await.unwrap();
     server.send(&invalid).await.unwrap();
 
-    let mut client_set = MessageSet::default();
+    let mut client_set = MessageSet::new(context());
     client_set.insert(payment.clone()).unwrap();
     client_set.insert(boundary.clone()).unwrap();
     client_set
@@ -86,7 +96,7 @@ async fn subprocess_typed_messages_converge() {
         .unwrap();
     assert!(CanonicalMessage::parse(client.recv().await.unwrap()).is_err());
 
-    let mut server_set = MessageSet::default();
+    let mut server_set = MessageSet::new(context());
     server_set.insert(psbt.clone()).unwrap();
     for _ in 0..3 {
         server_set

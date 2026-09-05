@@ -58,6 +58,21 @@ pub struct IdentityCollision {
     pub id: crate::MessageId,
 }
 
+/// Failure to combine a message with a context-bound grow-only set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MessageSetError {
+    /// The message or set belongs to another logical protocol context.
+    ContextMismatch {
+        /// Context required by the receiving set.
+        expected: crate::MessageContext,
+        /// Context carried by the message or set being combined.
+        received: crate::MessageContext,
+    },
+    /// Different canonical bytes were observed under the same full identity.
+    IdentityCollision(IdentityCollision),
+}
+
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -106,7 +121,32 @@ impl fmt::Display for InvalidUnknownMessageType {
         )
     }
 }
+impl fmt::Display for MessageSetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContextMismatch { expected, received } => write!(
+                f,
+                "message context {received:?} does not match set context {expected:?}"
+            ),
+            Self::IdentityCollision(error) => error.fmt(f),
+        }
+    }
+}
 impl Error for DecodeError {}
 impl Error for EncodeError {}
 impl Error for IdentityCollision {}
 impl Error for InvalidUnknownMessageType {}
+impl Error for MessageSetError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IdentityCollision(error) => Some(error),
+            Self::ContextMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<IdentityCollision> for MessageSetError {
+    fn from(error: IdentityCollision) -> Self {
+        Self::IdentityCollision(error)
+    }
+}

@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use sha2::{Digest, Sha256};
 
 /// Full collision-resistant logical message identity.
@@ -38,27 +40,38 @@ impl AsRef<[u8]> for MessageSetCommitment {
     }
 }
 /// Domain tag for message identities.
-pub const MESSAGE_ID_TAG: &str = "fungi/message-id";
+pub const MESSAGE_ID_TAG: &str = "fungi/v1/message-id";
 /// Domain tag for ordered full-ID set commitments.
-pub const SET_COMMITMENT_TAG: &str = "fungi/message-set";
+pub const SET_COMMITMENT_TAG: &str = "fungi/v1/message-set";
 
-pub(crate) fn tagged_hash(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
-    tagged_hash_iter(tag, parts.iter().copied())
-}
-
-pub(crate) fn tagged_hash_iter<'a>(
-    tag: &str,
-    parts: impl IntoIterator<Item = &'a [u8]>,
-) -> [u8; 32] {
+/// A hasher primed with one domain's BIP340 prefix.
+///
+/// `SHA256(tag)` written twice is exactly one 64-byte block, so its
+/// compression is identical for every hash in the domain. Priming once and
+/// cloning per hash is what earns the doubled tag its bytes: hashing a short
+/// message costs one block instead of three, while the tag itself is
+/// compressed once for the life of the process.
+fn primed(tag: &str) -> Sha256 {
     let tag_hash = Sha256::digest(tag.as_bytes());
     let mut hash = Sha256::new();
     hash.update(tag_hash);
     hash.update(tag_hash);
+    hash
+}
+
+static MESSAGE_ID_DOMAIN: LazyLock<Sha256> = LazyLock::new(|| primed(MESSAGE_ID_TAG));
+static SET_COMMITMENT_DOMAIN: LazyLock<Sha256> = LazyLock::new(|| primed(SET_COMMITMENT_TAG));
+
+pub(crate) fn message_id(bytes: &[u8]) -> MessageId {
+    let mut hash = MESSAGE_ID_DOMAIN.clone();
+    hash.update(bytes);
+    MessageId(hash.finalize().into())
+}
+
+pub(crate) fn set_commitment<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
+    let mut hash = SET_COMMITMENT_DOMAIN.clone();
     for part in parts {
         hash.update(part);
     }
     hash.finalize().into()
-}
-pub(crate) fn message_id(bytes: &[u8]) -> MessageId {
-    MessageId(tagged_hash(MESSAGE_ID_TAG, &[bytes]))
 }

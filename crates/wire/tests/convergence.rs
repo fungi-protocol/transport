@@ -4,11 +4,16 @@ use fungi_transport::framing::{DEFAULT_MAX_MSG_LEN, FramedChannel};
 use fungi_transport::mem::{MemConfig, group};
 use fungi_transport::{BroadcastChannel, Channel, GossipBroadcast};
 use fungi_wire::{
-    Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageSet,
+    Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageContext,
+    MessageSet, ProtocolSessionId, ProtocolVersion,
 };
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 const _: () = assert!(MAX_MESSAGE_SIZE <= DEFAULT_MAX_MSG_LEN);
+
+fn context() -> MessageContext {
+    MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
+}
 
 fn messages() -> Vec<CanonicalMessage> {
     let extended = Message {
@@ -25,7 +30,7 @@ fn messages() -> Vec<CanonicalMessage> {
         Message::new(Body::Confirmation(b"confirmation".to_vec())),
     ]
     .iter()
-    .map(|message| CanonicalMessage::encode(message).unwrap())
+    .map(|message| CanonicalMessage::encode(context(), message).unwrap())
     .collect()
 }
 
@@ -35,7 +40,7 @@ async fn converge<C: BroadcastChannel>(nodes: &mut [C]) -> Vec<MessageSet> {
         .iter()
         .cloned()
         .map(|message| {
-            let mut set = MessageSet::default();
+            let mut set = MessageSet::new(context());
             set.insert(message).unwrap();
             set
         })
@@ -67,8 +72,9 @@ async fn converge<C: BroadcastChannel>(nodes: &mut [C]) -> Vec<MessageSet> {
 
 #[tokio::test]
 async fn framed_boundary_message_is_admitted_but_invalid_bytes_are_not() {
-    let payload = vec![0; MAX_MESSAGE_SIZE - 7];
-    let boundary = CanonicalMessage::encode(&Message::new(Body::Payment(payload))).unwrap();
+    let payload = vec![0; MAX_MESSAGE_SIZE - 41];
+    let boundary =
+        CanonicalMessage::encode(context(), &Message::new(Body::Payment(payload))).unwrap();
     assert_eq!(boundary.as_bytes().len(), MAX_MESSAGE_SIZE);
 
     let (left, right) = tokio::io::duplex(64 * 1024);
@@ -79,10 +85,12 @@ async fn framed_boundary_message_is_admitted_but_invalid_bytes_are_not() {
     let received = CanonicalMessage::parse(received.unwrap()).unwrap();
     assert_eq!(received.id(), boundary.id());
 
-    let invalid = hex::decode("0003fd000568656c6c6f").unwrap();
+    let mut invalid = vec![0; 32];
+    invalid.extend_from_slice(&1u16.to_be_bytes());
+    invalid.extend_from_slice(&hex::decode("0003fd000568656c6c6f").unwrap());
     let (sent, received) = tokio::join!(sender.send(&invalid), receiver.recv());
     sent.unwrap();
-    let set = MessageSet::default();
+    let set = MessageSet::new(context());
     assert!(CanonicalMessage::parse(received.unwrap()).is_err());
     assert!(set.is_empty());
 }
