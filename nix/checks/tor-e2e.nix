@@ -234,12 +234,15 @@
           gossip_onion = peer_arti.succeed("grep ONION= /tmp/gossip.log").strip().split("=", 1)[1]
           # Same onion-settling pause as the dial steps above.
           peer_arti.sleep(90)
-          for node, kind, own in [
-              (peer_socks, "payment", "from-a"),
-              (peer_socks2, "confirmation", "from-c"),
+          # Each dialer carries BOTH identities at once: the shared protocol
+          # session every member is constructing, and its own transport-local
+          # circuit-isolation group. Neither substitutes for the other.
+          for node, kind, own, isolation in [
+              (peer_socks, "payment", "from-a", "1-1"),
+              (peer_socks2, "confirmation", "from-c", "1-2"),
           ]:
               node.succeed(
-                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} {session_args} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} {session_args} --circuit-isolation {isolation} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
           try:
               for node in [peer_socks, peer_socks2, peer_arti]:

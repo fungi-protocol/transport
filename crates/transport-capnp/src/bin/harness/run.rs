@@ -56,6 +56,10 @@ pub(crate) enum Cmd {
         listen_peers: u16,
         /// Outbound links to open, each with its own in-command retry.
         dials: Vec<OnionAddr>,
+        /// Transport-local circuit-isolation group for this node's dials.
+        /// Independent of the protocol session below: one names circuits, the
+        /// other names the construction, and a run may carry both.
+        circuit_isolation: Option<CircuitIsolationId>,
         /// This node's own canonical application message.
         message: CanonicalMessage,
         /// Exact protocol-session contract shared by every group member.
@@ -241,6 +245,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 virt_port,
                 listen_peers: listen_peers.unwrap_or(0),
                 dials,
+                circuit_isolation,
                 message: CanonicalMessage::encode(
                     session.context(),
                     &Message {
@@ -320,6 +325,7 @@ pub(crate) async fn run_gossip<T>(
     virt_port: Option<u16>,
     listen_peers: u16,
     dials: &[T::Addr],
+    circuit_isolation: Option<CircuitIsolationId>,
     application: GossipApplication,
 ) -> Result<(), String>
 where
@@ -346,7 +352,7 @@ where
         }),
         dials: dials.to_vec(),
         dial_retry: retry,
-        circuit_isolation: None,
+        circuit_isolation,
     };
     let (wiring, addr) = tokio::time::timeout(STEP_TIMEOUT, Wiring::start(&transport, cfg))
         .await
@@ -519,6 +525,7 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
             virt_port,
             listen_peers,
             dials,
+            circuit_isolation,
             message,
             session,
             duplicate,
@@ -529,6 +536,7 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
                 *virt_port,
                 *listen_peers,
                 dials,
+                *circuit_isolation,
                 GossipApplication {
                     message: message.clone(),
                     session: *session,
@@ -695,6 +703,8 @@ mod tests {
                 "1",
                 "--max-message-size",
                 "1048576",
+                "--circuit-isolation",
+                "7-3",
                 "--message-type",
                 "psbt",
                 "--message",
@@ -714,6 +724,7 @@ mod tests {
                 virt_port,
                 listen_peers,
                 dials,
+                circuit_isolation,
                 message,
                 session,
                 duplicate,
@@ -722,7 +733,11 @@ mod tests {
                 assert_eq!(virt_port, Some(9736));
                 assert_eq!(listen_peers, 2);
                 assert!(dials.is_empty());
+                // Both identities travel in one run, and neither stands in for
+                // the other: the circuit group is transport-local, the session
+                // is the construction every member shares.
                 assert_eq!(session, test_session_contract());
+                assert_eq!(circuit_isolation.unwrap().to_string(), "7-3");
                 let decoded = message.decode();
                 assert_eq!(decoded.body, Body::Psbt(b"from-b".to_vec()));
                 assert_eq!(
@@ -881,6 +896,7 @@ mod tests {
             Some(1),
             2,
             &[],
+            None,
             GossipApplication {
                 message: b_message,
                 session,
