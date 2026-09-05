@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use fungi_session::{MessageSizeLimit, SessionContract, bind_all};
 use fungi_transport::harness::{dial_sequence, echo_one_peer};
 use fungi_transport::{
     BroadcastChannel, CircuitIsolationId, Connector, DialRetry, GossipBroadcast, ListenParams,
@@ -15,10 +16,6 @@ use fungi_wire::{
     Body, CanonicalMessage, Extension, Extensions, Message, MessageContext, MessageSet,
     ProtocolSessionId, ProtocolVersion,
 };
-
-fn default_message_context() -> MessageContext {
-    MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
-}
 
 /// Bounded wait for every network step: the VM test must fail, not hang.
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -61,12 +58,21 @@ pub(crate) enum Cmd {
         dials: Vec<OnionAddr>,
         /// This node's own canonical application message.
         message: CanonicalMessage,
+        /// Exact protocol-session contract shared by every group member.
+        session: SessionContract,
         /// Publish the same event twice to exercise idempotent insertion.
         duplicate: bool,
         /// Distinct messages (own included) that mean convergence. Every
         /// participant in one run must use the same total.
         expect: usize,
     },
+}
+
+pub(crate) struct GossipApplication {
+    message: CanonicalMessage,
+    session: SessionContract,
+    duplicate: bool,
+    expect: usize,
 }
 
 pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
@@ -86,6 +92,9 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut duplicate = false;
     let mut expect = None;
     let mut listen_peers = None;
+    let mut protocol_session = None;
+    let mut protocol_version = None;
+    let mut max_message_size = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--private-net" => {
@@ -137,6 +146,34 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                         .map_err(|e| e.to_string())?,
                 )
             }
+            "--protocol-session" => {
+                let raw = it.next().ok_or("--protocol-session needs 64 hex digits")?;
+                let bytes = hex::decode(raw).map_err(|e| e.to_string())?;
+                protocol_session = Some(ProtocolSessionId::new(
+                    bytes
+                        .try_into()
+                        .map_err(|_| "--protocol-session needs 64 hex digits")?,
+                ));
+            }
+            "--protocol-version" => {
+                protocol_version = Some(ProtocolVersion::new(
+                    it.next()
+                        .ok_or("--protocol-version needs a number")?
+                        .parse::<u16>()
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            "--max-message-size" => {
+                max_message_size = Some(
+                    MessageSizeLimit::new(
+                        it.next()
+                            .ok_or("--max-message-size needs a number")?
+                            .parse::<usize>()
+                            .map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
+            }
             "--message" => message = Some(it.next().ok_or("--message needs text")?.into_bytes()),
             "--message-type" => {
                 message_type = Some(it.next().ok_or("--message-type needs a kind")?)
@@ -185,6 +222,13 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
             circuit_isolation,
         },
         "gossip" => {
+            let session = SessionContract::new(
+                MessageContext::new(
+                    protocol_session.ok_or("gossip needs --protocol-session")?,
+                    protocol_version.ok_or("gossip needs --protocol-version")?,
+                ),
+                max_message_size.ok_or("gossip needs --max-message-size")?,
+            );
             let payload = message.ok_or("gossip needs --message")?;
             let body = match message_type.as_deref() {
                 Some("psbt") => Body::Psbt(payload),
@@ -198,13 +242,14 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 listen_peers: listen_peers.unwrap_or(0),
                 dials,
                 message: CanonicalMessage::encode(
-                    default_message_context(),
+                    session.context(),
                     &Message {
                         body,
                         extensions: Extensions::new(extensions).map_err(|e| e.to_string())?,
                     },
                 )
                 .map_err(|e| e.to_string())?,
+                session,
                 duplicate,
                 expect: expect.ok_or("gossip needs --expect")?,
             }
@@ -275,9 +320,7 @@ pub(crate) async fn run_gossip<T>(
     virt_port: Option<u16>,
     listen_peers: u16,
     dials: &[T::Addr],
-    message: CanonicalMessage,
-    duplicate: bool,
-    expect: usize,
+    application: GossipApplication,
 ) -> Result<(), String>
 where
     T: Transport,
@@ -285,6 +328,12 @@ where
     <T::Connector as Connector>::Channel: SplitChannel + 'static,
     T::Listener: Listener<Channel = <T::Connector as Connector>::Channel>,
 {
+    let GossipApplication {
+        message,
+        session,
+        duplicate,
+        expect,
+    } = application;
     let retry = DialRetry {
         deadline: Some(ACCEPT_TIMEOUT),
         attempt_timeout: STEP_TIMEOUT,
@@ -328,7 +377,12 @@ where
     .map_err(|_| "wiring timed out".to_string())?
     .map_err(|e| e.to_string())?;
 
-    let mut node = GossipBroadcast::new(channels);
+    let channels = tokio::time::timeout(STEP_TIMEOUT, bind_all(channels, session))
+        .await
+        .map_err(|_| "session binding timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut node =
+        GossipBroadcast::new(channels).with_max_msg_len(session.max_message_size().get());
     let converged = tokio::time::timeout(
         STEP_TIMEOUT,
         collect_gossip(&mut node, &message, duplicate, expect),
@@ -468,6 +522,7 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
             listen_peers,
             dials,
             message,
+            session,
             duplicate,
             expect,
         } => {
@@ -476,9 +531,12 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
                 *virt_port,
                 *listen_peers,
                 dials,
-                message.clone(),
-                *duplicate,
-                *expect,
+                GossipApplication {
+                    message: message.clone(),
+                    session: *session,
+                    duplicate: *duplicate,
+                    expect: *expect,
+                },
             )
             .await
         }
@@ -488,6 +546,16 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SESSION_HEX: &str =
+        "0101010101010101010101010101010101010101010101010101010101010101";
+
+    fn test_session_contract() -> SessionContract {
+        SessionContract::new(
+            MessageContext::new(ProtocolSessionId::new([1; 32]), ProtocolVersion::new(1)),
+            MessageSizeLimit::new(fungi_wire::MAX_MESSAGE_SIZE).unwrap(),
+        )
+    }
 
     #[tokio::test]
     async fn run_listen_and_run_dial_roundtrip_over_mem() {
@@ -623,6 +691,12 @@ mod tests {
                 "9736",
                 "--listen-peers",
                 "2",
+                "--protocol-session",
+                TEST_SESSION_HEX,
+                "--protocol-version",
+                "1",
+                "--max-message-size",
+                "1048576",
                 "--message-type",
                 "psbt",
                 "--message",
@@ -643,12 +717,14 @@ mod tests {
                 listen_peers,
                 dials,
                 message,
+                session,
                 duplicate,
                 expect,
             } => {
                 assert_eq!(virt_port, Some(9736));
                 assert_eq!(listen_peers, 2);
                 assert!(dials.is_empty());
+                assert_eq!(session, test_session_contract());
                 let decoded = message.decode();
                 assert_eq!(decoded.body, Body::Psbt(b"from-b".to_vec()));
                 assert_eq!(
@@ -677,6 +753,12 @@ mod tests {
                 "/nix/store/xxx/bin/fungi-socks5h-plugin",
                 "--dial",
                 &onion,
+                "--protocol-session",
+                TEST_SESSION_HEX,
+                "--protocol-version",
+                "1",
+                "--max-message-size",
+                "1048576",
                 "--message-type",
                 "payment",
                 "--message",
@@ -781,11 +863,11 @@ mod tests {
         });
         let conn_a = transport.connector();
         let conn_c = transport.connector();
-        let encode = |body| {
-            CanonicalMessage::encode(default_message_context(), &Message::new(body)).unwrap()
-        };
+        let session = test_session_contract();
+        let encode =
+            |body| CanonicalMessage::encode(session.context(), &Message::new(body)).unwrap();
         let b_message = CanonicalMessage::encode(
-            default_message_context(),
+            session.context(),
             &Message {
                 body: Body::Psbt(b"from-b".to_vec()),
                 extensions: Extensions::new(vec![Extension {
@@ -796,10 +878,23 @@ mod tests {
             },
         )
         .unwrap();
-        let b = tokio::spawn(run_gossip(transport, Some(1), 2, &[], b_message, true, 3));
+        let b = tokio::spawn(run_gossip(
+            transport,
+            Some(1),
+            2,
+            &[],
+            GossipApplication {
+                message: b_message,
+                session,
+                duplicate: true,
+                expect: 3,
+            },
+        ));
         let dial_gossip = |conn: fungi_transport::mem::MemConnector, message: CanonicalMessage| async move {
             let ch = conn.connect(&MemAddr).await.unwrap();
-            let mut node = GossipBroadcast::new(vec![ch]);
+            let ch = fungi_session::bind(ch, session).await.unwrap();
+            let mut node =
+                GossipBroadcast::new(vec![ch]).with_max_msg_len(session.max_message_size().get());
             let set = collect_gossip(&mut node, &message, false, 3).await.unwrap();
             node.shutdown().await.unwrap();
             set

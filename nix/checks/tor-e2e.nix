@@ -223,10 +223,12 @@
           # Gossip convergence on a LINE topology: A(socks5h) — B(arti) — C(socks5h).
           # Only B publishes an onion; A and C dial it. A's message can reach C
           # only through B's forwarding — plain multicast cannot serve this graph.
+          session_hex = "01" * 32
+          session_args = f"--protocol-session {session_hex} --protocol-version 1 --max-message-size 1048576"
           peer_socks2.wait_for_unit("tor.service")
           peer_socks2.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
           peer_arti.succeed(
-              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-gossip --virt-port 9736 --listen-peers 2 --message-type psbt --message from-b --extension 1:optional --duplicate --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-gossip --virt-port 9736 --listen-peers 2 {session_args} --message-type psbt --message from-b --extension 1:optional --duplicate --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_arti.wait_until_succeeds("grep -q READY /tmp/gossip.log", timeout=600)
           gossip_onion = peer_arti.succeed("grep ONION= /tmp/gossip.log").strip().split("=", 1)[1]
@@ -237,7 +239,7 @@
               (peer_socks2, "confirmation", "from-c"),
           ]:
               node.succeed(
-                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+                  f"({e2e} gossip --plugin {socks5h_plugin} --dial {gossip_onion} {session_args} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
           try:
               for node in [peer_socks, peer_socks2, peer_arti]:
@@ -255,9 +257,9 @@
                       identity, encoded = message.removeprefix("MSG=").split(":", 1)
                       assert len(identity) == 64, message
                       assert encoded in [
-                          "00010666726f6d2d6201086f7074696f6e616c",
-                          "00030666726f6d2d61",
-                          "00050666726f6d2d63",
+                          session_hex + "000100010666726f6d2d6201086f7074696f6e616c",
+                          session_hex + "000100030666726f6d2d61",
+                          session_hex + "000100050666726f6d2d63",
                       ], message
                   message_sets.append(messages)
                   commitments.append(commitment)
@@ -269,6 +271,23 @@
               # dump it unconditionally, not just on the success path.
               for node in [peer_socks, peer_socks2, peer_arti]:
                   node.execute("cat /tmp/gossip.err >&2 || true")
+
+          # A peer with a mismatched exact protocol version is rejected during
+          # the connection-local binding, before either side constructs gossip.
+          peer_arti.succeed(
+              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch --virt-port 9737 --listen-peers 1 {session_args} --message-type psbt --message listener --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
+          )
+          peer_arti.wait_until_succeeds("grep -q READY /tmp/mismatch.log", timeout=600)
+          mismatch_onion = peer_arti.succeed("grep ONION= /tmp/mismatch.log").strip().split("=", 1)[1]
+          peer_arti.sleep(90)
+          peer_socks.succeed(
+              f"({e2e} gossip --plugin {socks5h_plugin} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
+          )
+          for node in [peer_socks, peer_arti]:
+              node.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=900)
+              assert node.succeed("cat /tmp/mismatch.code").strip() != "0"
+              node.succeed("grep -q 'protocol version' /tmp/mismatch.err")
+              node.succeed("test ! -s /tmp/mismatch.log || ! grep -q '^MSG=' /tmp/mismatch.log")
         '';
       };
       }

@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use fungi_session::{MessageSizeLimit, SessionBindingError, SessionContract, bind};
 use fungi_transport::mem::MemAddr;
 use fungi_transport::testkit;
 use fungi_transport::{Channel, Connector, ListenParams, Listener, Transport};
@@ -20,6 +21,10 @@ const MEM_PLUGIN: &str = env!("CARGO_BIN_EXE_mem-plugin");
 
 fn context() -> MessageContext {
     MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
+}
+
+fn session_contract() -> SessionContract {
+    SessionContract::new(context(), MessageSizeLimit::new(MAX_MESSAGE_SIZE).unwrap())
 }
 
 /// Spawn the `mem-plugin` child and connect a `CapnpTransport` to it over the
@@ -110,6 +115,106 @@ async fn subprocess_typed_messages_converge() {
         client_set.iter().map(|(id, _)| id).collect::<Vec<_>>(),
         server_set.iter().map(|(id, _)| id).collect::<Vec<_>>()
     );
+}
+
+/// SESSION BINDING: both directions exchange the connection-local session
+/// hello through capnp-rpc before canonical application traffic is accepted.
+#[tokio::test]
+async fn subprocess_session_binding_precedes_application_traffic() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let contract = session_contract();
+    let (client, server) = tokio::join!(
+        bind(client.unwrap(), contract),
+        bind(server.unwrap(), contract)
+    );
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    let message =
+        CanonicalMessage::encode(context(), &Message::new(Body::Psbt(b"bound".to_vec()))).unwrap();
+
+    client.send(message.as_bytes()).await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), message.as_bytes());
+}
+
+/// SESSION BINDING: the size limit agreed in the handshake, not the plugin's
+/// own frame cap, is what governs application traffic across the boundary.
+#[tokio::test]
+async fn subprocess_traffic_is_governed_by_the_negotiated_size_limit() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let contract = SessionContract::new(context(), MessageSizeLimit::new(64).unwrap());
+    let (client, server) = tokio::join!(
+        bind(client.unwrap(), contract),
+        bind(server.unwrap(), contract)
+    );
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+
+    let oversized =
+        CanonicalMessage::encode(context(), &Message::new(Body::Psbt(vec![0; 64]))).unwrap();
+    assert!(oversized.as_bytes().len() > 64);
+    assert!(matches!(
+        client.send(oversized.as_bytes()).await,
+        Err(fungi_transport::SendError::TooLarge { max: 64 })
+    ));
+
+    // Refusing it left the link alive.
+    let fits =
+        CanonicalMessage::encode(context(), &Message::new(Body::Psbt(b"ok".to_vec()))).unwrap();
+    client.send(fits.as_bytes()).await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), fits.as_bytes());
+}
+
+/// SESSION BINDING: a peer presenting another exact protocol version is
+/// refused at the handshake, across the plugin boundary, before either side
+/// could construct gossip.
+#[tokio::test]
+async fn subprocess_binding_refuses_a_mismatched_protocol_version() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let theirs = SessionContract::new(
+        MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(2)),
+        MessageSizeLimit::new(MAX_MESSAGE_SIZE).unwrap(),
+    );
+    let (client, server) = tokio::join!(
+        bind(client.unwrap(), session_contract()),
+        bind(server.unwrap(), theirs)
+    );
+    assert!(matches!(
+        client.unwrap_err(),
+        SessionBindingError::VersionMismatch { .. }
+    ));
+    assert!(matches!(
+        server.unwrap_err(),
+        SessionBindingError::VersionMismatch { .. }
+    ));
+}
+
+/// SESSION BINDING: application traffic sent where the hello was required is
+/// rejected as premature, not parsed as a handshake.
+#[tokio::test]
+async fn subprocess_binding_rejects_premature_application_traffic() {
+    let transport = wire();
+    let connector = transport.connector();
+    let (mut listener, addr) = transport.listen(ListenParams::new(1)).await.unwrap();
+    let (client, server) = tokio::join!(connector.connect(&addr), listener.accept());
+    let message =
+        CanonicalMessage::encode(context(), &Message::new(Body::Psbt(b"early".to_vec()))).unwrap();
+    let unbound = async {
+        let mut server = server.unwrap();
+        server.send(message.as_bytes()).await.unwrap();
+        server
+    };
+    let (client, _server) = tokio::join!(bind(client.unwrap(), session_contract()), unbound);
+    assert!(matches!(
+        client.unwrap_err(),
+        SessionBindingError::PrematureApplicationMessage
+    ));
 }
 
 /// CONFORMANCE: run the connection-oriented lifecycle suite through the

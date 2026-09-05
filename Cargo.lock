@@ -1421,6 +1421,7 @@ dependencies = [
  "capnp",
  "capnp-rpc",
  "capnpc",
+ "fungi-session",
  "fungi-transport",
  "fungi-wire",
  "futures",
