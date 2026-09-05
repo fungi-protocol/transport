@@ -678,3 +678,81 @@ mod tests {
         assert!(matches!(collected[2], Err(RecvError::Closed)));
     }
 }
+
+/// A P2P link admitted to one protocol session: everything it yields has been
+/// validated against that session's contract, and everything handed to it is
+/// refused if it has not.
+///
+/// A methodless marker, like [`Send`] and [`Sync`]: nothing here can be
+/// checked at this layer, because the contract it stands for is defined a
+/// layer above. Implementing it ASSERTS the property rather than proving it.
+///
+/// It exists so a group cannot be formed on links that were never admitted:
+/// [`GossipBroadcast`](crate::GossipBroadcast) requires it, so the ordering
+/// the protocol depends on — admit every link, then form the group — is a
+/// compile error to get wrong instead of a convention to remember. A link
+/// earns the property by being bound; [`AssumeSessionBound`] is the deliberate
+/// way to claim it without.
+pub trait SessionBound: SplitChannel {}
+
+/// Claims [`SessionBound`] for a link that never earned it.
+///
+/// Nothing is checked. It exists to exercise the relay engine in isolation,
+/// where a link carries only what the test writes and there is no peer to
+/// break a contract. Reaching for it in production means forming a group on
+/// traffic nobody validated.
+///
+/// ```
+/// use fungi_transport::{AssumeSessionBound, GossipBroadcast};
+/// use fungi_transport::mem::{MemConfig, duplex};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let (a, _b) = duplex(MemConfig::default());
+/// let _group = GossipBroadcast::new(vec![AssumeSessionBound(a)]);
+/// # }
+/// ```
+///
+/// Without it, a raw link does not compile:
+///
+/// ```compile_fail
+/// use fungi_transport::GossipBroadcast;
+/// use fungi_transport::mem::{MemConfig, duplex};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let (a, _b) = duplex(MemConfig::default());
+/// // error[E0277]: the trait bound `MemChannel: SessionBound` is not
+/// // satisfied — this link was never admitted to a protocol session.
+/// let _group = GossipBroadcast::new(vec![a]);
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct AssumeSessionBound<C>(pub C);
+
+impl<C: SplitChannel> Channel for AssumeSessionBound<C> {
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
+        self.0.send(msg)
+    }
+
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
+        self.0.recv()
+    }
+}
+
+impl<C: SplitChannel> SplitChannel for AssumeSessionBound<C> {
+    type SendHalf<'a>
+        = C::SendHalf<'a>
+    where
+        Self: 'a;
+    type RecvHalf<'a>
+        = C::RecvHalf<'a>
+    where
+        Self: 'a;
+
+    fn split(&mut self) -> (Self::SendHalf<'_>, Self::RecvHalf<'_>) {
+        self.0.split()
+    }
+}
+
+impl<C: SplitChannel> SessionBound for AssumeSessionBound<C> {}

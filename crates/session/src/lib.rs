@@ -70,7 +70,9 @@ mod contract;
 mod error;
 mod hello;
 
-pub use channel::{SessionBoundChannel, SessionRecvHalf, SessionSendHalf, bind, bind_all};
+pub use channel::{
+    SessionBoundChannel, SessionRecvHalf, SessionSendHalf, bind, bind_all, bind_group,
+};
 pub use contract::{MessageSizeLimit, SessionContract};
 pub use error::{InvalidMessageSizeLimit, SessionBindingError};
 pub use fungi_wire::{MessageContext, ProtocolSessionId, ProtocolVersion};

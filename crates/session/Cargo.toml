@@ -11,6 +11,7 @@ fungi-wire = { path = "../wire" }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+hex = "0.4"
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "time"] }
 
 [lints]

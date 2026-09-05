@@ -1,6 +1,8 @@
 use std::{fmt, future::Future, sync::OnceLock};
 
-use fungi_transport::{Channel, RecvError, RecvHalf, SendError, SendHalf, SplitChannel};
+use fungi_transport::{
+    Channel, GossipBroadcast, RecvError, RecvHalf, SendError, SendHalf, SessionBound, SplitChannel,
+};
 use fungi_wire::CanonicalMessage;
 use futures_util::future::{try_join, try_join_all};
 
@@ -114,6 +116,27 @@ where
     C: SplitChannel,
 {
     try_join_all(channels.into_iter().map(|channel| bind(channel, contract))).await
+}
+
+/// A bound channel has earned admission: everything crossing it is checked
+/// against the session contract, in both directions.
+impl<C: SplitChannel> SessionBound for SessionBoundChannel<C> {}
+
+/// Bind every link and form the group's gossip node, in one step.
+///
+/// This is the production path, and it closes both ways a group could be
+/// formed wrongly: links that were never admitted are refused by the type
+/// system, and the size limit applied is the one both ends actually agreed to
+/// rather than one the caller has to remember to repeat.
+pub async fn bind_group<C>(
+    channels: Vec<C>,
+    contract: SessionContract,
+) -> Result<GossipBroadcast, SessionBindingError>
+where
+    C: SplitChannel + 'static,
+{
+    let channels = bind_all(channels, contract).await?;
+    Ok(GossipBroadcast::new(channels).with_max_msg_len(contract.max_message_size().get()))
 }
 
 fn validate_application(

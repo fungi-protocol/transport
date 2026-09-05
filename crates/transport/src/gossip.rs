@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
 use crate::channel::{
-    BroadcastChannel, Connector, ListenParams, Listener, RecvHalf, SendHalf, SplitChannel,
+    BroadcastChannel, Connector, ListenParams, Listener, RecvHalf, SendHalf, SessionBound,
     Transport,
 };
 use crate::error::{ConnectError, RecvError, SendError};
@@ -39,13 +39,13 @@ use crate::isolation::CircuitIsolationId;
 /// - The hub never awaits an output. A full link or consumer queue ends the
 ///   group: bounded memory and liveness are preserved without presenting a
 ///   silently divergent message set as a healthy channel.
-/// - Each link is driven through [`SplitChannel`]: its sending and receiving
-///   halves run as two joined loops, so a forward waiting on a slow peer
-///   never stops that link from draining what the peer sends. There is no
-///   wall-clock deadline, but the queues stay bounded: if a blocked link's
-///   command queue fills, the group ends explicitly rather than silently
-///   losing convergence. Establishing the group is a separate matter, and
-///   its cadence is the caller's to state.
+/// - Each link is driven through [`SplitChannel`](crate::SplitChannel): its
+///   sending and receiving halves run as two joined loops, so a forward
+///   waiting on a slow peer never stops that link from draining what the
+///   peer sends. There is no wall-clock deadline, but the queues stay
+///   bounded: if a blocked link's command queue fills, the group ends
+///   explicitly rather than silently losing convergence. Establishing the
+///   group is a separate matter, and its cadence is the caller's to state.
 /// - Dropping the object abandons the node mid-flight (fine for a
 ///   process that lives on); [`shutdown`](GossipBroadcast::shutdown)
 ///   instead drains locally accepted work, joins every task, and reports a
@@ -166,12 +166,12 @@ impl GossipBroadcast {
     /// peer link). The channels must form a connected graph across the
     /// group or messages cannot reach everyone — wiring the graph is the
     /// caller's job (see [`Wiring`]).
-    pub fn new<C: SplitChannel + 'static>(channels: Vec<C>) -> Self {
+    pub fn new<C: SessionBound + 'static>(channels: Vec<C>) -> Self {
         Self::with_config(channels, GossipConfig::default())
     }
 
     /// Build a gossip node with explicit internal bounds.
-    pub fn with_config<C: SplitChannel + 'static>(channels: Vec<C>, config: GossipConfig) -> Self {
+    pub fn with_config<C: SessionBound + 'static>(channels: Vec<C>, config: GossipConfig) -> Self {
         assert!(
             config.queue_capacity > 0,
             "gossip queue capacity must be nonzero"
@@ -664,6 +664,20 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::AssumeSessionBound;
+
+    /// The relay engine under test carries only what these tests write, so
+    /// admission is asserted rather than earned.
+    fn gossip(channels: Vec<crate::mem::MemChannel>) -> GossipBroadcast {
+        GossipBroadcast::new(channels.into_iter().map(AssumeSessionBound).collect())
+    }
+
+    fn gossip_with(channels: Vec<crate::mem::MemChannel>, config: GossipConfig) -> GossipBroadcast {
+        GossipBroadcast::with_config(
+            channels.into_iter().map(AssumeSessionBound).collect(),
+            config,
+        )
+    }
     use super::*;
     use crate::channel::Channel;
     use crate::mem::{MemConfig, duplex};
@@ -690,7 +704,7 @@ mod tests {
         per_node
             .into_iter()
             .map(|chs| {
-                let g = GossipBroadcast::new(chs);
+                let g = gossip(chs);
                 match max_msg_len {
                     Some(max) => g.with_max_msg_len(max),
                     None => g,
@@ -729,9 +743,9 @@ mod tests {
     async fn line_relays_through_a_passive_middle_node() {
         let (a_ab, b_ab) = duplex(cfg());
         let (b_bc, c_bc) = duplex(cfg());
-        let mut a = GossipBroadcast::new(vec![a_ab]);
-        let _b = GossipBroadcast::new(vec![b_ab, b_bc]); // alive, never consumed
-        let mut c = GossipBroadcast::new(vec![c_bc]);
+        let mut a = gossip(vec![a_ab]);
+        let _b = gossip(vec![b_ab, b_bc]); // alive, never consumed
+        let mut c = gossip(vec![c_bc]);
         a.send(b"through").await.unwrap();
         let got = tokio::time::timeout(Duration::from_secs(5), c.recv())
             .await
@@ -771,8 +785,8 @@ mod tests {
     #[tokio::test]
     async fn pair_exchanges_both_ways_without_echo() {
         let (ab, ba) = duplex(cfg());
-        let mut a = GossipBroadcast::new(vec![ab]);
-        let mut b = GossipBroadcast::new(vec![ba]);
+        let mut a = gossip(vec![ab]);
+        let mut b = gossip(vec![ba]);
         a.send(b"from-a").await.unwrap();
         b.send(b"from-b").await.unwrap();
         assert_eq!(b.recv().await.unwrap(), b"from-a");
@@ -786,8 +800,8 @@ mod tests {
     #[tokio::test]
     async fn recv_reports_dead_after_peer_drops() {
         let (ab, ba) = duplex(cfg());
-        let mut a = GossipBroadcast::new(vec![ab]);
-        let b = GossipBroadcast::new(vec![ba]);
+        let mut a = gossip(vec![ab]);
+        let b = gossip(vec![ba]);
         drop(b);
         assert!(a.recv().await.is_err());
     }
@@ -802,7 +816,7 @@ mod tests {
             capacity: Some(1),
             ..MemConfig::default()
         });
-        let mut a = GossipBroadcast::new(vec![ab]);
+        let mut a = gossip(vec![ab]);
         // Two forwards against a one-slot link nobody drains: the second is
         // stuck in the sending half from here on.
         a.send(b"fills the link").await.unwrap();
@@ -821,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_flushes_pending_sends() {
         let (ab, mut ba) = duplex(cfg());
-        let mut a = GossipBroadcast::new(vec![ab]);
+        let mut a = gossip(vec![ab]);
         a.send(b"parting word").await.unwrap();
         a.shutdown().await.unwrap();
         assert_eq!(ba.recv().await.unwrap(), b"parting word");
@@ -831,7 +845,7 @@ mod tests {
     // channels, sends are vacuously Ok and recv reports the channel dead.
     #[tokio::test]
     async fn empty_group_sends_vacuously_and_recv_is_dead() {
-        let mut g = GossipBroadcast::new(Vec::<crate::mem::MemChannel>::new());
+        let mut g = gossip(Vec::new());
         g.send(b"into the void").await.unwrap();
         assert!(matches!(g.recv().await, Err(RecvError::Closed)));
     }
@@ -841,7 +855,7 @@ mod tests {
     // send.
     #[tokio::test]
     async fn empty_group_still_enforces_max_msg_len() {
-        let mut g = GossipBroadcast::new(Vec::<crate::mem::MemChannel>::new()).with_max_msg_len(4);
+        let mut g = gossip(Vec::new()).with_max_msg_len(4);
         assert!(matches!(
             g.send(b"oversized").await,
             Err(SendError::TooLarge { max: 4 })
@@ -860,8 +874,8 @@ mod tests {
             queue_capacity: 512,
         };
         let (ab, ba) = duplex(roomy);
-        let mut a = GossipBroadcast::with_config(vec![ab], config);
-        let mut b = GossipBroadcast::with_config(vec![ba], config);
+        let mut a = gossip_with(vec![ab], config);
+        let mut b = gossip_with(vec![ba], config);
 
         async fn send_burst(node: &mut GossipBroadcast, tag: u8) {
             for i in 0..200u32 {
@@ -901,7 +915,7 @@ mod tests {
             ..MemConfig::default()
         });
         let config = GossipConfig { queue_capacity: 1 };
-        let mut a = GossipBroadcast::with_config(vec![ab], config);
+        let mut a = gossip_with(vec![ab], config);
         let _parked = ba;
 
         let mut observed_failure = false;
@@ -933,7 +947,7 @@ mod tests {
             ..MemConfig::default()
         });
         let config = GossipConfig { queue_capacity: 1 };
-        let mut a = GossipBroadcast::with_config(vec![ab], config);
+        let mut a = gossip_with(vec![ab], config);
 
         for message in [b"one".as_slice(), b"two", b"three"] {
             let _ = ba.send(message).await;
@@ -1003,9 +1017,9 @@ mod tests {
                 w.establish().await
             },
         );
-        let mut b = GossipBroadcast::new(b_chs.unwrap());
-        let mut a = GossipBroadcast::new(a_res.unwrap());
-        let mut c = GossipBroadcast::new(c_res.unwrap());
+        let mut b = gossip(b_chs.unwrap());
+        let mut a = gossip(a_res.unwrap());
+        let mut c = gossip(c_res.unwrap());
 
         a.send(b"from-a").await.unwrap();
         b.send(b"from-b").await.unwrap();

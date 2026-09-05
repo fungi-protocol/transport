@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use fungi_session::{MessageSizeLimit, SessionContract, bind_all};
+use fungi_session::{MessageSizeLimit, SessionContract, bind_group};
 use fungi_transport::harness::{dial_sequence, echo_one_peer};
 use fungi_transport::{
     BroadcastChannel, CircuitIsolationId, Connector, DialRetry, GossipBroadcast, ListenParams,
@@ -377,12 +377,10 @@ where
     .map_err(|_| "wiring timed out".to_string())?
     .map_err(|e| e.to_string())?;
 
-    let channels = tokio::time::timeout(STEP_TIMEOUT, bind_all(channels, session))
+    let mut node = tokio::time::timeout(STEP_TIMEOUT, bind_group(channels, session))
         .await
         .map_err(|_| "session binding timed out".to_string())?
         .map_err(|e| e.to_string())?;
-    let mut node =
-        GossipBroadcast::new(channels).with_max_msg_len(session.max_message_size().get());
     let converged = tokio::time::timeout(
         STEP_TIMEOUT,
         collect_gossip(&mut node, &message, duplicate, expect),
@@ -892,9 +890,7 @@ mod tests {
         ));
         let dial_gossip = |conn: fungi_transport::mem::MemConnector, message: CanonicalMessage| async move {
             let ch = conn.connect(&MemAddr).await.unwrap();
-            let ch = fungi_session::bind(ch, session).await.unwrap();
-            let mut node =
-                GossipBroadcast::new(vec![ch]).with_max_msg_len(session.max_message_size().get());
+            let mut node = fungi_session::bind_group(vec![ch], session).await.unwrap();
             let set = collect_gossip(&mut node, &message, false, 3).await.unwrap();
             node.shutdown().await.unwrap();
             set
@@ -917,7 +913,7 @@ mod tests {
 
         let (ab, _ba) = duplex(MemConfig::default());
         ab.fail_next(1);
-        let mut node = GossipBroadcast::new(vec![ab]);
+        let mut node = GossipBroadcast::new(vec![fungi_transport::AssumeSessionBound(ab)]);
         node.send(b"owed").await.unwrap();
 
         let error = shutdown_gossip(node).await.unwrap_err();

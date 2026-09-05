@@ -1,8 +1,10 @@
-//! Typed-message convergence across server-style broadcast and framed gossip.
+//! Typed-message convergence across server-style broadcast and framed gossip,
+//! over links admitted to a protocol session the way production admits them.
 
+use fungi_session::{MessageSizeLimit, SessionContract, bind_group};
 use fungi_transport::framing::{DEFAULT_MAX_MSG_LEN, FramedChannel};
 use fungi_transport::mem::{MemConfig, group};
-use fungi_transport::{BroadcastChannel, Channel, GossipBroadcast};
+use fungi_transport::{BroadcastChannel, Channel};
 use fungi_wire::{
     Body, CanonicalMessage, Extension, Extensions, MAX_MESSAGE_SIZE, Message, MessageContext,
     MessageSet, ProtocolSessionId, ProtocolVersion,
@@ -13,6 +15,10 @@ const _: () = assert!(MAX_MESSAGE_SIZE <= DEFAULT_MAX_MSG_LEN);
 
 fn context() -> MessageContext {
     MessageContext::new(ProtocolSessionId::new([0; 32]), ProtocolVersion::new(1))
+}
+
+fn contract() -> SessionContract {
+    SessionContract::new(context(), MessageSizeLimit::new(MAX_MESSAGE_SIZE).unwrap())
 }
 
 fn messages() -> Vec<CanonicalMessage> {
@@ -109,11 +115,14 @@ async fn mem_and_framed_gossip_converge_on_the_same_message_set() {
     let (ab, ba) = tokio::io::duplex(4096);
     let (bc, cb) = tokio::io::duplex(4096);
     let framed = |stream| FramedChannel::new(stream, DEFAULT_MAX_MSG_LEN);
-    let mut gossip = vec![
-        GossipBroadcast::new(vec![framed(ab)]),
-        GossipBroadcast::new(vec![framed(ba), framed(bc)]),
-        GossipBroadcast::new(vec![framed(cb)]),
-    ];
+    // Every link is admitted before the group exists, and each node binds its
+    // own links concurrently — the same shape the production harness uses.
+    let (a, b, c) = tokio::join!(
+        bind_group(vec![framed(ab)], contract()),
+        bind_group(vec![framed(ba), framed(bc)], contract()),
+        bind_group(vec![framed(cb)], contract()),
+    );
+    let mut gossip = vec![a.unwrap(), b.unwrap(), c.unwrap()];
     let gossip_sets = converge(&mut gossip).await;
 
     let expected = server_sets[0].commitment();
