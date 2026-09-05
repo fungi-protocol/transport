@@ -1377,6 +1377,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fungi-session"
+version = "0.1.0"
+dependencies = [
+ "fungi-transport",
+ "fungi-wire",
+ "futures-util",
+ "tokio",
+]
+
+[[package]]
 name = "fungi-transport"
 version = "0.1.0"
 dependencies = [

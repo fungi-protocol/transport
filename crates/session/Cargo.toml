@@ -1,0 +1,17 @@
+[package]
+name = "fungi-session"
+description = "Protocol-session binding for Fungi P2P channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fungi-transport = { path = "../transport" }
+fungi-wire = { path = "../wire" }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

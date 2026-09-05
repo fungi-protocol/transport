@@ -22,10 +22,12 @@ canonical wire-message layer.
 | [`fungi-transport-arti`](crates/transport-arti) | Tor backend with Tor running **in-process** (Arti). |
 | [`fungi-transport-capnp`](crates/transport-capnp) | Cap'n Proto plugin layer to run a backend out-of-process. |
 | [`fungi-wire`](crates/wire) | Candidate canonical typed-message encoding, logical message IDs, and grow-only message sets. |
+| [`fungi-session`](crates/session) | Connection-local protocol-session binding and validation before closed-group gossip. |
 
 Directory names stay short inside the workspace, while Cargo package names
 retain the `fungi-` prefix so dependencies and Rust imports remain explicit to
-consumers (`fungi_transport`, `fungi_wire`, and the backend crates).
+consumers (`fungi_transport`, `fungi_wire`, `fungi_session`, and the backend
+crates).
 
 ## Building and testing
 
