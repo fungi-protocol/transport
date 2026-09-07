@@ -31,6 +31,13 @@ pub(crate) struct Cli {
     pub(crate) cmd: Cmd,
     pub(crate) private_net: Option<std::path::PathBuf>,
     pub(crate) state_dir: Option<std::path::PathBuf>,
+    /// Where the backend keeps directory data it may reuse across runs.
+    /// Separate from `state_dir` because identity and cache have opposite
+    /// wants: a run that must be a NEW peer needs its own state, while every
+    /// run wants the network directory somebody already downloaded. Defaults
+    /// to a directory under `state_dir`, which keeps a single-run caller from
+    /// having to say it twice.
+    pub(crate) cache_dir: Option<std::path::PathBuf>,
     /// The plugin binary to drive: the harness spawns it and speaks capnp-rpc
     /// to it over its stdio. Every backend is reached this way, so this is
     /// required.
@@ -87,6 +94,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut target = None;
     let mut plugin = None;
     let mut state_dir = None;
+    let mut cache_dir = None;
     let mut circuit_isolation = None;
     let mut peers = None;
     let mut dials = Vec::new();
@@ -129,6 +137,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 )
             }
             "--state-dir" => state_dir = Some(it.next().ok_or("--state-dir needs a path")?.into()),
+            "--cache-dir" => cache_dir = Some(it.next().ok_or("--cache-dir needs a path")?.into()),
             "--plugin" => plugin = Some(it.next().ok_or("--plugin needs a path")?.into()),
             "--dial" => {
                 let raw = it.next().ok_or("--dial needs host:port")?;
@@ -265,6 +274,7 @@ pub(crate) fn parse_args(args: Vec<String>) -> Result<Cli, String> {
         cmd,
         private_net,
         state_dir,
+        cache_dir,
         plugin,
     })
 }
@@ -470,8 +480,8 @@ async fn shutdown_gossip(node: GossipBroadcast) -> Result<(), String> {
 ///
 /// Backend configuration is delivered two ways, and each backend uses only what
 /// it needs. Directory config goes through the environment: `--state-dir` sets
-/// `FUNGI_STATE_DIR`/`FUNGI_CACHE_DIR` for arti's persistent state and cache
-/// (socks5h ignores them). The private test network goes through the plugin's
+/// `FUNGI_STATE_DIR` and, unless `--cache-dir` overrides it, `FUNGI_CACHE_DIR`
+/// for arti's persistent state and cache (socks5h ignores them). The private test network goes through the plugin's
 /// `TestFixtures.configurePrivateNet` capability instead — `--private-net` is
 /// read here and installed before the transport is first driven, since arti must
 /// fix its authorities before its one bootstrap; socks5h treats it as a no-op.
@@ -487,7 +497,14 @@ pub(crate) async fn run(cli: Cli) -> Result<(), String> {
     command.env("FS_MISTRUST_DISABLE_PERMISSIONS_CHECKS", "1");
     if let Some(dir) = &cli.state_dir {
         command.env("FUNGI_STATE_DIR", dir.join("state"));
-        command.env("FUNGI_CACHE_DIR", dir.join("cache"));
+    }
+    if let Some(dir) = cli
+        .cache_dir
+        .as_ref()
+        .map(|dir| dir.join("cache"))
+        .or_else(|| cli.state_dir.as_ref().map(|dir| dir.join("cache")))
+    {
+        command.env("FUNGI_CACHE_DIR", dir);
     }
 
     let transport: CapnpTransport<OnionAddr> = connect_plugin(command);
@@ -821,6 +838,39 @@ mod tests {
         assert_eq!(
             cli.state_dir.as_deref(),
             Some(std::path::Path::new("/tmp/arti-dial"))
+        );
+        // Unset here: the caller that says nothing about a cache wants the one
+        // under its state dir, which `run` derives.
+        assert_eq!(cli.cache_dir, None);
+    }
+
+    /// A cache shared with other runs is named separately from the identity
+    /// state, so a run can be a new peer on a directory it did not download.
+    #[test]
+    fn cli_parsing_takes_a_cache_dir_apart_from_the_state_dir() {
+        let cli = parse_args(
+            [
+                "fungi-harness",
+                "dial",
+                "--plugin",
+                "/nix/store/xxx/bin/fungi-arti-plugin",
+                "--state-dir",
+                "/tmp/arti-dial",
+                "--cache-dir",
+                "/tmp/arti-shared",
+                &format!("{:a<56}.onion:9735", "host"),
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            cli.state_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/arti-dial"))
+        );
+        assert_eq!(
+            cli.cache_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/arti-shared"))
         );
     }
 
