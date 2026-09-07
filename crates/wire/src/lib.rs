@@ -7,6 +7,16 @@
 //! Unknown odd message and extension types remain byte-identical so an older
 //! Fungi relay can forward and commit to newer optional application messages.
 //!
+//! Because the context travels inside the bytes, admission is a property of
+//! the message and not of the connection that carried it: [`MessageSet`]
+//! refuses anything committed to another session or version. A transport that
+//! has a link of its own can confirm the same context once, at the link, and
+//! then trust what crosses it; nothing requires one. A message arriving from a
+//! store-and-forward service, where there is no peer to handshake with, is
+//! admitted or refused by exactly this check and no other.
+//! [`CanonicalMessage::validate`] applies it without copying or deriving an
+//! identity, for a relay that forwards what it does not keep.
+//!
 //! ```
 //! use fungi_wire::{
 //!     Body, CanonicalMessage, Message, MessageContext, MessageSet, ProtocolSessionId,
@@ -31,6 +41,13 @@
 //! let commitment = set.commitment();
 //! set.insert(message).unwrap();
 //! assert_eq!(set.commitment(), commitment);
+//!
+//! // Admission is by the message's own context: one committed to another
+//! // session is refused here, with no link and no handshake in sight.
+//! let elsewhere = MessageContext::new(ProtocolSessionId::new([9; 32]), ProtocolVersion::new(1));
+//! let foreign =
+//!     CanonicalMessage::encode(elsewhere, &Message::new(Body::Psbt(b"fragment".to_vec()))).unwrap();
+//! assert!(set.insert(foreign).is_err());
 //! ```
 
 #![forbid(unsafe_code)]
