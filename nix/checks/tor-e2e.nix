@@ -158,8 +158,14 @@
 
           peer_socks.wait_for_unit("tor.service")
           peer_socks.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
+          # `set +e` on every backgrounded node, and it is not decoration: the
+          # driver runs each command under `set -euo pipefail`, the subshell
+          # inherits it, and a harness that exits non-zero would abort the
+          # subshell before `echo $? > …code` — leaving the exit code of every
+          # FAILING run unrecorded, which is the only run whose code anyone
+          # wants.
           peer_socks.succeed(
-              f"({e2e} listen --plugin {socks5h_plugin} --virt-port 9735 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
+              f"(set +e; {e2e} listen --plugin {socks5h_plugin} --virt-port 9735 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_socks.wait_until_succeeds("grep -q READY /tmp/listen.log", timeout=300)
           onion = peer_socks.succeed("grep ONION= /tmp/listen.log").strip().split("=", 1)[1]
@@ -195,7 +201,7 @@
           # The listener must outlive its first peer: it serves the default
           # dial below plus the two isolated dials after it, sequentially.
           peer_arti.succeed(
-              f"({e2e} listen --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-listen {arti_cache} --virt-port 9735 --peers 3 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
+              f"(set +e; {e2e} listen --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-listen {arti_cache} --virt-port 9735 --peers 3 > /tmp/listen.log 2>/tmp/listen.err; echo $? > /tmp/listen.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_arti.wait_until_succeeds("grep -q READY /tmp/listen.log", timeout=600)
           onion2 = peer_arti.succeed("grep ONION= /tmp/listen.log").strip().split("=", 1)[1]
@@ -246,7 +252,7 @@
           peer_socks2.wait_for_unit("tor.service")
           peer_socks2.wait_until_succeeds("nc -z 127.0.0.1 9051", timeout=120)
           peer_socks.succeed(
-              f"({e2e} gossip --plugin {socks5h_plugin} --virt-port 9736 --listen-peers 2 {session_args} --message-type psbt --message from-b --extension 1:optional --duplicate --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+              f"(set +e; {e2e} gossip --plugin {socks5h_plugin} --virt-port 9736 --listen-peers 2 {session_args} --message-type psbt --message from-b --extension 1:optional --duplicate --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_socks.wait_until_succeeds("grep -q READY /tmp/gossip.log", timeout=600)
           gossip_onion = peer_socks.succeed("grep ONION= /tmp/gossip.log").strip().split("=", 1)[1]
@@ -261,7 +267,7 @@
           ]:
               prefix = arti_log if plugin == arti_plugin else ""
               node.succeed(
-                  f"({prefix} {e2e} gossip --plugin {plugin} {extra} --dial {gossip_onion} {session_args} --circuit-isolation {isolation} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+                  f"(set +e; {prefix} {e2e} gossip --plugin {plugin} {extra} --dial {gossip_onion} {session_args} --circuit-isolation {isolation} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
           try:
               # A node that has already exited cannot go on to print OK, so stop
@@ -306,13 +312,13 @@
           # What this proves is a handshake rule, not a publication: the
           # listener is the socks5h peer for the same reason the gossip hub is.
           peer_socks.succeed(
-              f"({e2e} gossip --plugin {socks5h_plugin} --virt-port 9737 --listen-peers 1 {session_args} --message-type psbt --message listener --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
+              f"(set +e; {e2e} gossip --plugin {socks5h_plugin} --virt-port 9737 --listen-peers 1 {session_args} --message-type psbt --message listener --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
           )
           peer_socks.wait_until_succeeds("grep -q READY /tmp/mismatch.log", timeout=600)
           mismatch_onion = peer_socks.succeed("grep ONION= /tmp/mismatch.log").strip().split("=", 1)[1]
           peer_socks.sleep(90)
           peer_arti.succeed(
-              f"({arti_log} {e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch {arti_cache} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
+              f"(set +e; {arti_log} {e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch {arti_cache} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
           )
           try:
               # The rejection itself is the claim, and each side writes it the
