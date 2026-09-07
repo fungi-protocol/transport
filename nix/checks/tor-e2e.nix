@@ -315,21 +315,30 @@
               f"({arti_log} {e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch {arti_cache} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
           )
           try:
-              # Wait on the DIALER, which always terminates: it is rejected, or
-              # its own retry budget ends. The listener leaves accept() only
-              # once a peer arrives, so waiting on it first turns every dial
-              # failure into a silent timeout with nothing to read.
-              peer_arti.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=900)
-              # Then the listener, which the rejection releases — a check by
-              # now, not a wait.
-              peer_socks.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=300)
-              for node in [peer_socks, peer_arti]:
-                  assert node.succeed("cat /tmp/mismatch.code").strip() != "0"
-                  node.succeed("grep -q 'protocol version' /tmp/mismatch.err")
+              # The rejection itself is the claim, and each side writes it the
+              # moment it happens — so wait for THAT, not for a process to
+              # exit. Both ends must refuse: the dialer because its peer
+              # answered version 1, the listener because its peer offered 2.
+              for node in [peer_arti, peer_socks]:
+                  node.wait_until_succeeds(
+                      "grep -q 'protocol version' /tmp/mismatch.err", timeout=900
+                  )
                   node.succeed("test ! -s /tmp/mismatch.log || ! grep -q '^MSG=' /tmp/mismatch.log")
+              # A refusal ends the run, so the exit follows within seconds. It
+              # is a separate claim from the refusal, and saying so separately
+              # is what tells "the binding is wrong" apart from "the binding is
+              # right and the process will not leave".
+              for node in [peer_arti, peer_socks]:
+                  node.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=120)
+                  assert node.succeed("cat /tmp/mismatch.code").strip() != "0"
           finally:
               for node in [peer_socks, peer_arti]:
                   node.execute("cat /tmp/mismatch.err >&2 || true")
+                  # Which of the two the run hit — a process that stayed, or a
+                  # code that was never written — is not readable from the
+                  # stderr alone.
+                  node.execute("ls -l /tmp/mismatch.log /tmp/mismatch.err /tmp/mismatch.code >&2 || true")
+                  node.execute("pgrep -a -f 'harness gossip' >&2 || true")
         '';
       };
       }
