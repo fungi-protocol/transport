@@ -176,6 +176,10 @@
           # bootstrap downloaded, so a later phase is not a cold client on a
           # CPU-starved VM while its peers are already dialing it.
           arti_cache = "--cache-dir /tmp/arti-shared"
+          # Arti's own account of a dial, on the plugin's stderr, which each
+          # phase already collects. Scoped to the onion-service client: a bare
+          # `info` buries the interesting lines under bootstrap chatter.
+          arti_log = "RUST_LOG=warn,arti_client=info,tor_hsclient=debug"
           peer_arti.wait_until_succeeds(
               f"{e2e} dial --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-dial {arti_cache} {onion}",
               timeout=900,
@@ -255,8 +259,9 @@
               (peer_socks2, socks5h_plugin, "", "payment", "from-a", "1-1"),
               (peer_arti, arti_plugin, f"--private-net /tmp/private-net --state-dir /tmp/arti-gossip {arti_cache}", "confirmation", "from-c", "1-2"),
           ]:
+              prefix = arti_log if plugin == arti_plugin else ""
               node.succeed(
-                  f"({e2e} gossip --plugin {plugin} {extra} --dial {gossip_onion} {session_args} --circuit-isolation {isolation} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
+                  f"({prefix} {e2e} gossip --plugin {plugin} {extra} --dial {gossip_onion} {session_args} --circuit-isolation {isolation} --message-type {kind} --message {own} --expect 3 > /tmp/gossip.log 2>/tmp/gossip.err; echo $? > /tmp/gossip.code) </dev/null >/dev/null 2>&1 &"
               )
           try:
               # A node that has already exited cannot go on to print OK, so stop
@@ -307,13 +312,24 @@
           mismatch_onion = peer_socks.succeed("grep ONION= /tmp/mismatch.log").strip().split("=", 1)[1]
           peer_socks.sleep(90)
           peer_arti.succeed(
-              f"({e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch {arti_cache} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
+              f"({arti_log} {e2e} gossip --plugin {arti_plugin} --private-net /tmp/private-net --state-dir /tmp/arti-mismatch {arti_cache} --dial {mismatch_onion} --protocol-session {session_hex} --protocol-version 2 --max-message-size 1048576 --message-type payment --message dialer --expect 2 > /tmp/mismatch.log 2>/tmp/mismatch.err; echo $? > /tmp/mismatch.code) </dev/null >/dev/null 2>&1 &"
           )
-          for node in [peer_socks, peer_arti]:
-              node.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=900)
-              assert node.succeed("cat /tmp/mismatch.code").strip() != "0"
-              node.succeed("grep -q 'protocol version' /tmp/mismatch.err")
-              node.succeed("test ! -s /tmp/mismatch.log || ! grep -q '^MSG=' /tmp/mismatch.log")
+          try:
+              # Wait on the DIALER, which always terminates: it is rejected, or
+              # its own retry budget ends. The listener leaves accept() only
+              # once a peer arrives, so waiting on it first turns every dial
+              # failure into a silent timeout with nothing to read.
+              peer_arti.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=900)
+              # Then the listener, which the rejection releases — a check by
+              # now, not a wait.
+              peer_socks.wait_until_succeeds("test -s /tmp/mismatch.code", timeout=300)
+              for node in [peer_socks, peer_arti]:
+                  assert node.succeed("cat /tmp/mismatch.code").strip() != "0"
+                  node.succeed("grep -q 'protocol version' /tmp/mismatch.err")
+                  node.succeed("test ! -s /tmp/mismatch.log || ! grep -q '^MSG=' /tmp/mismatch.log")
+          finally:
+              for node in [peer_socks, peer_arti]:
+                  node.execute("cat /tmp/mismatch.err >&2 || true")
         '';
       };
       }
