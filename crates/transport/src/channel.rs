@@ -407,10 +407,14 @@ pub trait Listener: Send {
     fn accept(&mut self) -> impl Future<Output = Result<Self::Channel, ConnectError>> + Send;
 }
 
-/// Backend-agnostic parameters for creating a listener.
+/// Parameters for publishing a listener, in the shape a connection-oriented
+/// transport needs: a virtual port and an identity hint, both interpreted by
+/// the backend. The implementations that exist today publish Tor onion
+/// services; a transport whose receiving side is not a published service —
+/// a mailbox on a server, say — has no listener and no use for this type.
 #[derive(Debug, Clone, Default)]
 pub struct ListenParams {
-    /// The virtual port the onion service listens on.
+    /// The virtual port the published service listens on.
     pub virt_port: u16,
     /// Identity hint, interpreted per backend. A backend with persistent
     /// identities (arti) loads or creates the identity stored under this
@@ -439,9 +443,12 @@ impl ListenParams {
     }
 }
 
-/// A transport factory: opens connectors and creates listeners (publishing an
-/// onion identity). Connection initiation and identity creation live here —
-/// the surface beyond the per-message [`Channel`].
+/// A transport factory: opens connectors and creates listeners (publishing
+/// this peer's identity). Connection initiation and identity creation live
+/// here — the surface beyond the per-message [`Channel`]. It describes
+/// transports that are dialed and accepted; a transport that only posts to
+/// and reads from a service implements [`Channel`] or [`BroadcastChannel`]
+/// directly and leaves this trait alone.
 ///
 /// The `Addr` returned by [`listen`](Transport::listen) is this peer's
 /// authenticatable identity: hand it to peers out of band, and whoever
@@ -490,10 +497,15 @@ pub trait Transport: Send {
     /// the SAME group may share one. Isolation is per transport: the same
     /// [`CircuitIsolationId`] on another transport (or process) shares nothing. See
     /// [`isolation`](crate::isolation).
+    ///
+    /// The separation is a requirement, not a hint, so a transport that
+    /// cannot partition the paths its channels take must not implement this
+    /// trait at all: returning the default connector here would present an
+    /// unlinkability the transport never provides.
     fn isolated_connector(&self, isolation: &CircuitIsolationId) -> Self::Connector;
 
-    /// Create and publish a listener, returning it together with the onion
-    /// address it was published under (the generated/loaded identity).
+    /// Create and publish a listener, returning it together with the address
+    /// it was published under (the generated/loaded identity).
     fn listen(
         &self,
         params: ListenParams,

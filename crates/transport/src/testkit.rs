@@ -1,7 +1,12 @@
 //! Conformance suite for [`Channel`] and [`BroadcastChannel`] implementations.
 //! Any transport (in-memory, SOCKS5h, arti, OHTTP mailbox) must pass these;
-//! each test takes a freshly connected pair. Ordering is deliberately NOT
-//! asserted — the trait promises none.
+//! the P2P items take a freshly connected pair, the broadcast items a group.
+//! Ordering is deliberately NOT asserted — the trait promises none.
+//!
+//! One broadcast item is shape-specific. A group reached through peers dies
+//! when the peers go, so [`closed_after_group_drop`] holds there; a group
+//! reached through a service has no members to drop, and the item does not
+//! apply to it. Every other item holds for both.
 
 use crate::channel::{
     AttributableBroadcastChannel, BroadcastChannel, Channel, Connector, Listener, RecvHalf,
@@ -179,6 +184,10 @@ pub async fn broadcast_too_large_is_recoverable<B: BroadcastChannel>(
 
 /// Once every other member is gone, the last member's recv reports the
 /// channel dead.
+///
+/// For groups carried by peers: the members ARE the group, so losing them
+/// ends it. A service-backed group outlives its members and is not expected
+/// to pass this.
 pub async fn closed_after_group_drop<B: BroadcastChannel>(mut group: Vec<B>) {
     let mut last = group.pop().expect("non-empty group");
     drop(group);
