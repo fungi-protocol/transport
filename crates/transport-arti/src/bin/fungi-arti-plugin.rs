@@ -51,6 +51,17 @@ impl PluginFixtures for ArtiFixtures {
 }
 
 fn main() {
+    // Arti reports what it is doing through `tracing`, and a plugin with no
+    // subscriber drops all of it — which is why a dial that never connects has
+    // been silent. Honour `RUST_LOG` when it is set, on STDERR: stdout carries
+    // the capnp session and writing there would corrupt it.
+    if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .init();
+    }
+
     let state_dir = env_dir("FUNGI_STATE_DIR", "fungi-arti-state");
     let cache_dir = env_dir("FUNGI_CACHE_DIR", "fungi-arti-cache");
 

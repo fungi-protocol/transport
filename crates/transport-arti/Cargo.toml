@@ -13,6 +13,10 @@ fungi-transport = { path = "../transport" }
 fungi-transport-capnp = { path = "../transport-capnp" }
 # `rt`/`io-std` for the plugin binary's current-thread runtime + stdio server.
 tokio = { version = "1", features = ["rt", "io-std"] }
+# arti narrates itself through `tracing`; with no subscriber every record is
+# dropped and a failed dial has nothing to say. The plugin installs one when
+# asked (see the binary), so a run that is going wrong can be read.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # arti-client auto-installs a rustls crypto provider only when exactly one is
 # in the graph; the plugin binary installs one explicitly so bootstrap never
 # panics.

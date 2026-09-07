@@ -1414,6 +1414,7 @@ dependencies = [
  "tor-llcrypto",
  "tor-proto",
  "tor-rtcompat",
+ "tracing-subscriber",
 ]
 
 [[package]]
