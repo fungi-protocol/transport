@@ -2,3 +2,4 @@
 //! its own branch and is not part of the published workspace.
 
 pub mod meter;
+pub mod topology;
