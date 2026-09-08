@@ -169,9 +169,18 @@ pub struct ConstructionConfig {
     /// Share of peers that can resolve prevouts locally (full nodes). NOT a
     /// measured figure, same treatment.
     pub full_node_fraction: f64,
-    /// Share of peers whose input was added after the coalition formation
-    /// proposal was signed, and whose validation dependencies therefore have
-    /// to be replicated.
+    /// Share of peers whose validation dependencies are not already known to
+    /// every participant, and so have to be replicated.
+    ///
+    /// The protocol's reason for that is a late addition: an input the signed
+    /// proposal does not name. This models the DISSEMINATION consequence of
+    /// being one, which is the dependency nobody holds in advance. It does
+    /// not model the rest of what a late addition costs; the input has to be
+    /// proven spendable by a key the proposal did not name either, so it also
+    /// carries an ownership proof certifying that key, an ordinary
+    /// content-addressed message of a couple of hundred bytes that no peer
+    /// can decline. A real late addition therefore costs more than this
+    /// share charges it, by roughly one ownership proof each.
     ///
     /// The remaining peers' inputs are named in the proposal every
     /// participant signed, so their prevouts and previous transactions are
