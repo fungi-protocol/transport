@@ -9,6 +9,8 @@ use fungi_transport::mem::{MemConfig, duplex};
 use fungi_transport::{AssumeSessionBound, BroadcastChannel, GossipBroadcast, GossipConfig};
 use fungi_transport::{RecvError, SendError};
 
+use crate::async_pull::{AnnounceBroadcast, PullConfig};
+use crate::engine::ObjId;
 use fungi_wire::{CanonicalMessage, MessageSet};
 use tokio::sync::Notify;
 
@@ -128,6 +130,8 @@ pub struct Outcome {
 enum Node {
     /// The production engine.
     Push(GossipBroadcast),
+    /// The announce/pull engine built to its shape.
+    Pull(AnnounceBroadcast),
 }
 
 impl Node {
@@ -135,6 +139,7 @@ impl Node {
     async fn send(&mut self, msg: &[u8]) -> Result<(), SendError> {
         match self {
             Self::Push(node) => node.send(msg).await,
+            Self::Pull(node) => node.send(msg).await,
         }
     }
 
@@ -142,6 +147,7 @@ impl Node {
     async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
         match self {
             Self::Push(node) => node.recv().await,
+            Self::Pull(node) => node.recv().await,
         }
     }
 
@@ -150,6 +156,7 @@ impl Node {
     async fn shutdown(self) -> Result<(), String> {
         match self {
             Self::Push(node) => node.shutdown().await.map_err(|error| error.to_string()),
+            Self::Pull(node) => node.shutdown().await.map_err(|error| format!("{error:?}")),
         }
     }
 }
@@ -164,10 +171,9 @@ pub async fn run(config: RunConfig) -> Outcome {
         schedule,
         engine,
     } = config;
-    assert_eq!(
-        engine,
-        Engine::Push,
-        "run() drives the production engine; every modelled scheme goes \
+    assert!(
+        matches!(engine, Engine::Push | Engine::AsyncAnnouncePull { .. }),
+        "run() drives the asynchronous engines; every modelled scheme goes \
          through engine::run_modelled"
     );
     let log = Arc::new(Recorder::default());
@@ -200,12 +206,55 @@ pub async fn run(config: RunConfig) -> Outcome {
         .map(|_| MessageSet::new(workload.context()))
         .collect();
 
+    // A peer that resolves a dependency locally holds it before anything
+    // crosses a link, and announces it like anything else it holds. Push has
+    // no way to use that — it cannot decline what is being forwarded — so it
+    // is granted only to the scheme that can, which is the comparison.
+    let shared = Arc::new(workload.clone());
+    let mut known: Vec<Vec<(ObjId, Arc<[u8]>)>> = match engine {
+        Engine::Push => vec![Vec::new(); topology.n],
+        _ => {
+            let mut known = vec![Vec::new(); topology.n];
+            for publication in workload.phases().iter().flatten() {
+                let id = ObjId::of(&publication.bytes, &workload);
+                let ObjId::Dependency(dep) = id else { continue };
+                let bytes: Arc<[u8]> = Arc::from(publication.bytes.as_slice());
+                for (node, holdings) in known.iter_mut().enumerate() {
+                    if node != publication.origin && workload.holds_a_priori(node, dep) {
+                        holdings.push((id, bytes.clone()));
+                        let message = CanonicalMessage::parse(publication.bytes.clone())
+                            .expect("workload publications are canonical");
+                        sets[node]
+                            .insert(message)
+                            .expect("a resolved dependency belongs to this session");
+                    }
+                }
+            }
+            known
+        }
+    };
+
     let mut nodes: Vec<Node> = (0..topology.n)
         .map(|node| {
-            Node::Push(GossipBroadcast::with_config(
-                links.remove(&node).unwrap_or_default(),
-                GossipConfig { queue_capacity },
-            ))
+            let channels = links.remove(&node).unwrap_or_default();
+            match engine {
+                Engine::Push => Node::Push(GossipBroadcast::with_config(
+                    channels,
+                    GossipConfig { queue_capacity },
+                )),
+                _ => Node::Pull(AnnounceBroadcast::with_config(
+                    channels,
+                    PullConfig {
+                        queue_capacity,
+                        batch: match engine {
+                            Engine::AsyncAnnouncePull { batch } => batch,
+                            _ => 1,
+                        },
+                    },
+                    shared.clone(),
+                    std::mem::take(&mut known[node]),
+                )),
+            }
         })
         .collect();
 

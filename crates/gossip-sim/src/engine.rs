@@ -48,6 +48,19 @@ pub enum Engine {
         /// Identities per announcement or request frame.
         batch: usize,
     },
+    /// The same scheme built the way the production engine is built — a hub
+    /// task per node, a task per link, bounded queues that fail loudly.
+    ///
+    /// It exists because the model above is validated against the engine on
+    /// PUSH alone, where agreement is guaranteed anyway: push sends
+    /// `k + (n-1)(k-1)` copies whatever order it runs in. Announcing is not
+    /// like that — how much a peer suppresses depends on what it has been
+    /// told when it decides — so the one scheme the model cannot vouch for
+    /// is the one it recommends.
+    AsyncAnnouncePull {
+        /// Identities per announcement or request frame.
+        batch: usize,
+    },
     /// Push anything at or below `push_below` payload bytes, announce the
     /// rest. The threshold is the knob the transcript's own rule predicts:
     /// announcing pays when the identity is much smaller than the object.
@@ -258,7 +271,9 @@ pub async fn run_modelled(config: RunConfig) -> Outcome {
         engine,
     } = config;
     let batch = match engine {
-        Engine::Push => panic!("Engine::Push is the asynchronous engine; drive it with run()"),
+        Engine::Push | Engine::AsyncAnnouncePull { .. } => {
+            panic!("asynchronous engines are driven by run(), not by the model")
+        }
         Engine::ModelledPush => 1,
         Engine::AnnouncePull { batch } | Engine::Hybrid { batch, .. } => batch.max(1),
     };
@@ -365,7 +380,9 @@ pub async fn run_modelled(config: RunConfig) -> Outcome {
                     )
                     .await
                 }
-                Engine::Push => unreachable!("rejected above"),
+                Engine::Push | Engine::AsyncAnnouncePull { .. } => {
+                    unreachable!("rejected above")
+                }
             };
             if !moved {
                 break;
@@ -918,6 +935,49 @@ mod tests {
         // `duplicates` is deliberately not asserted: it counts receipts, and
         // which link delivered a given copy first is exactly what the visit
         // order decides.
+    }
+
+    /// The check the whole recommendation rests on: does announce/pull cost
+    /// what the model says it costs, when it is built the way the production
+    /// engine is built?
+    ///
+    /// Exact equality is NOT the criterion here, and asserting it would be
+    /// wrong. Push's send count is `k + (n-1)(k-1)` whatever order it runs
+    /// in, which is why the model reproduces it to the byte; announcing has
+    /// no such form, because how much a peer suppresses depends on what it
+    /// has been told by the time it decides. So what is pinned is that the
+    /// two land in the same place — and the size of whatever gap there is,
+    /// which is the finding.
+    #[tokio::test]
+    async fn the_asynchronous_engine_costs_what_the_model_says_it_does() {
+        for (peers, degree) in [(20usize, 4usize), (40, 4)] {
+            let modelled =
+                run_modelled(cell(peers, degree, 0, Engine::AnnouncePull { batch: 50 })).await;
+            let real = run(cell(
+                peers,
+                degree,
+                0,
+                Engine::AsyncAnnouncePull { batch: 50 },
+            ))
+            .await;
+
+            assert!(real.converged, "n={peers}: the engine must reach one set");
+            assert!(real.drained, "n={peers}: and drain cleanly");
+
+            let (model_row, engine_row) = (
+                Row::from_outcome(&modelled, degree, 0),
+                Row::from_outcome(&real, degree, 0),
+            );
+            let gap = (engine_row.per_peer_bytes as f64 / model_row.per_peer_bytes as f64) - 1.0;
+            assert!(
+                gap.abs() < 0.25,
+                "n={peers}: engine sent {} per peer against the model's {} ({:+.1}%) — if this \
+                 has moved, the report's announce/pull figures have moved with it",
+                engine_row.per_peer_bytes,
+                model_row.per_peer_bytes,
+                gap * 100.0
+            );
+        }
     }
 
     /// Pull pays a cycle per phase that push does not, and the item's
