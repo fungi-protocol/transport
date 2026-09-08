@@ -1629,6 +1629,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9985c9503b412198aa4197559e9a318524ebc4519c229bfa05a535828c950b9d"
 
 [[package]]
+name = "gossip-sim"
+version = "0.1.0"
+dependencies = [
+ "fungi-session",
+ "fungi-transport",
+ "fungi-wire",
+ "futures-util",
+ "rand 0.8.7",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2819,6 +2832,7 @@ version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
+ "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
