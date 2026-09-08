@@ -4,3 +4,4 @@
 pub mod deps;
 pub mod meter;
 pub mod topology;
+pub mod workload;
