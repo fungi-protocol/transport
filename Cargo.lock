@@ -1636,6 +1636,7 @@ dependencies = [
  "fungi-transport",
  "fungi-wire",
  "futures-util",
+ "proptest",
  "rand 0.8.7",
  "sha2",
  "tokio",

@@ -17,6 +17,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }
+proptest = "1"
 
 [lints]
 workspace = true

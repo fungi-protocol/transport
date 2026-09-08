@@ -217,6 +217,38 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// The grid test above pins ten seeds at the cells the tables use,
+        /// which says a partitioned draw was not SEEN, not that one cannot
+        /// happen. This walks the feasible input space instead, so a degree
+        /// or a peer count nothing currently sweeps cannot quietly hand back
+        /// a graph that cannot converge.
+        #[test]
+        fn any_feasible_degree_yields_a_simple_connected_k_regular_graph(
+            n in 4usize..60,
+            k in 2usize..12,
+            seed: u64,
+        ) {
+            proptest::prop_assume!(k < n && (n * k).is_multiple_of(2));
+
+            let t = Topology::degree_k(n, k, seed)
+                .unwrap_or_else(|| panic!("n={n}, k={k}, seed={seed} is feasible"));
+
+            proptest::prop_assert!(t.is_connected(), "n={}, k={}, seed={}: partitioned", n, k, seed);
+            proptest::prop_assert!(
+                first_offending(&t.edges).is_none(),
+                "n={}, k={}, seed={}: self-loop or repeated edge", n, k, seed
+            );
+            for node in 0..n {
+                proptest::prop_assert_eq!(
+                    t.neighbours(node).len(),
+                    k,
+                    "n={}, k={}, seed={}, node={}: degree not preserved", n, k, seed, node
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_graph_with_two_disjoint_edges_is_not_connected() {
         let t = Topology {
