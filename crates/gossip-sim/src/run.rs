@@ -414,7 +414,7 @@ pub async fn run(config: RunConfig) -> Outcome {
 mod tests {
     use super::*;
     use crate::meter::Dir;
-    use crate::workload::ConstructionConfig;
+    use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat};
     use std::time::Duration;
 
     /// 20 peers, degree 4, capacity 2 sits on the boundary this sweep
@@ -560,7 +560,11 @@ mod tests {
             seed: 0,
             legacy_fraction: 0.3,
             full_node_fraction: 0.5,
+            late_addition_fraction: 1.0,
+            dependencies: DependencyAddressing::Separate,
             validity_proofs_per_phase: 0,
+            late_addition_overhead: 0,
+            proofs: ProofFormat::Compact,
         });
         let cell = |queue_capacity| RunConfig {
             topology: Topology::degree_k(peers, 4, 0).expect("feasible at n=40, k=4"),

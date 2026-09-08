@@ -228,6 +228,9 @@ impl BroadcastChannel for AnnounceBroadcast {
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
+        // A pure pop: cancel-safe by the queue's contract, which the driver
+        // relies on by racing this against a wakeup in a `select!`. Closes
+        // when the hub exits, which is the whole channel dying.
         self.incoming.recv().await.ok_or(RecvError::Closed)
     }
 }
@@ -402,7 +405,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::topology::Topology;
-    use crate::workload::{ConstructionConfig, Workload};
+    use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat, Workload};
 
     /// A group of `peers` nodes over `topology`, each told about whichever
     /// dependency objects it resolves locally.
@@ -523,7 +526,11 @@ mod tests {
                 seed: 0,
                 legacy_fraction: 0.3,
                 full_node_fraction,
+                late_addition_fraction: 1.0,
+                dependencies: DependencyAddressing::Separate,
                 validity_proofs_per_phase: 0,
+                late_addition_overhead: 0,
+                proofs: ProofFormat::Compact,
             }));
             let topology = Topology::degree_k(peers, 4, 0).expect("n=16, k=4 is feasible");
             let mut nodes = group(&topology, &workload, 8);

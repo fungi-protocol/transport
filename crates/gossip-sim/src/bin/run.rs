@@ -17,7 +17,9 @@ use gossip_sim::engine::run_modelled;
 use gossip_sim::report::{Row, render};
 use gossip_sim::run::{Outcome, RunConfig, Schedule, run};
 use gossip_sim::topology::Topology;
-use gossip_sim::workload::{ConstructionConfig, OpenBroadcastConfig, ProofFormat, Workload};
+use gossip_sim::workload::{
+    ConstructionConfig, DependencyAddressing, OpenBroadcastConfig, ProofFormat, Workload,
+};
 
 /// The engine queue bound the first two tables run under. Slices 1 and 2
 /// were measured before the bound was an input at all, under the engine's
@@ -120,15 +122,27 @@ async fn open_row(
 /// One scheme on one construction cell, with the full-node share stated:
 /// what a peer knowing an object a priori is actually worth to the scheme,
 /// as opposed to what push wastes by not being able to use it.
-async fn holder_row(label: &str, peers: usize, full_node_fraction: f64, engine: Engine) {
+async fn holder_row(
+    label: &str,
+    peers: usize,
+    legacy_fraction: f64,
+    full_node_fraction: f64,
+    late_addition_fraction: f64,
+    dependencies: DependencyAddressing,
+    engine: Engine,
+) {
     let seed = 0u64;
     let degree = 4;
     let workload = Workload::construction_with(ConstructionConfig {
         peers,
         seed,
-        legacy_fraction: 0.3,
+        legacy_fraction,
         full_node_fraction,
+        late_addition_fraction,
+        dependencies,
         validity_proofs_per_phase: 0,
+        late_addition_overhead: 0,
+        proofs: ProofFormat::Compact,
     });
     let Some(topology) = Topology::degree_k(peers, degree, seed) else {
         return;
@@ -157,7 +171,7 @@ async fn holder_row(label: &str, peers: usize, full_node_fraction: f64, engine: 
 }
 
 /// One scheme on one construction cell carrying BFT overhead.
-async fn bft_row(label: &str, peers: usize, proofs: usize, engine: Engine) {
+async fn bft_row(label: &str, peers: usize, proofs: usize, format: ProofFormat, engine: Engine) {
     let seed = 0u64;
     let degree = 4;
     let workload = Workload::construction_with(ConstructionConfig {
@@ -165,7 +179,11 @@ async fn bft_row(label: &str, peers: usize, proofs: usize, engine: Engine) {
         seed,
         legacy_fraction: 0.3,
         full_node_fraction: 0.5,
+        late_addition_fraction: 1.0,
+        dependencies: DependencyAddressing::Separate,
         validity_proofs_per_phase: proofs,
+        late_addition_overhead: 0,
+        proofs: format,
     });
     let Some(topology) = Topology::degree_k(peers, degree, seed) else {
         return;
@@ -202,7 +220,11 @@ async fn scheme_row(label: &str, peers: usize, degree: usize, seed: u64, engine:
         seed,
         legacy_fraction: 0.3,
         full_node_fraction: 0.5,
+        late_addition_fraction: 1.0,
+        dependencies: DependencyAddressing::Separate,
         validity_proofs_per_phase: 0,
+        late_addition_overhead: 0,
+        proofs: ProofFormat::Compact,
     });
     let Some(topology) = Topology::degree_k(peers, degree, seed) else {
         eprintln!("schemes: no connected degree-{degree} graph on {peers} nodes for seed {seed}");
@@ -244,7 +266,7 @@ async fn scheme_row(label: &str, peers: usize, degree: usize, seed: u64, engine:
 /// set costs about a minute and holds a few hundred megabytes at its widest
 /// cell, which is more than the machine this is measured on wants to give at
 /// once, so a table can be asked for by name.
-const TABLES: [&str; 13] = [
+const TABLES: [&str; 17] = [
     "thin",
     "capacity",
     "deps",
@@ -257,6 +279,10 @@ const TABLES: [&str; 13] = [
     "thousand",
     "real",
     "holders",
+    "late",
+    "late-cost",
+    "bundling",
+    "bundling-sweep",
     "threshold",
 ];
 
@@ -292,6 +318,10 @@ async fn main() {
             "thousand" => thousand().await,
             "real" => real().await,
             "holders" => holders().await,
+            "late" => late().await,
+            "late-cost" => late_cost().await,
+            "bundling" => bundling().await,
+            "bundling-sweep" => bundling_sweep().await,
             "threshold" => threshold().await,
             other => unreachable!("{other} is named in TABLES but has no table"),
         }
@@ -398,7 +428,11 @@ async fn deps(peers: usize) {
                 seed,
                 legacy_fraction: 0.3,
                 full_node_fraction,
+                late_addition_fraction: 1.0,
+                dependencies: DependencyAddressing::Separate,
                 validity_proofs_per_phase: 0,
+                late_addition_overhead: 0,
+                proofs: ProofFormat::Compact,
             });
             let degree = 4;
             let Some(topology) = Topology::degree_k(peers, degree, seed) else {
@@ -434,7 +468,7 @@ async fn scale() {
     // which renders as an ordinary row, so a cell that never returns is a
     // different finding and is reported rather than awaited.
     let deadline = Duration::from_secs(10);
-    // The peer count the transcript names as the target. One table per
+    // The peer count the target scale is described in. One table per
     // engine queue bound, because the bound is not a column: at the
     // engine's own default the group stops finishing somewhere between
     // twenty and forty peers, and the same graphs and workloads converge
@@ -453,7 +487,11 @@ async fn scale() {
                 seed,
                 legacy_fraction: 0.3,
                 full_node_fraction: 0.5,
+                late_addition_fraction: 1.0,
+                dependencies: DependencyAddressing::Separate,
                 validity_proofs_per_phase: 0,
+                late_addition_overhead: 0,
+                proofs: ProofFormat::Compact,
             });
             let degree = 4;
             let Some(topology) = Topology::degree_k(n, degree, seed) else {
@@ -486,9 +524,9 @@ async fn scale() {
 /// The schemes table.
 async fn schemes() {
     // The comparison the item asks for: the same workload and the same graph
-    // under each scheme. Announcement batch sizes are Yuval's own order of
-    // magnitude — about fifty 32-byte identities fit in a 1500-byte packet —
-    // bracketed by the degenerate one-per-frame case so the cost of framing
+    // under each scheme. The announcement batch sizes are the packet's own
+    // order of magnitude: about fifty 32-byte identities fit in 1500 bytes.
+    // Bracketed by the degenerate one-per-frame case so the cost of framing
     // is visible rather than assumed.
     for n in [20usize, 100] {
         println!(
@@ -692,19 +730,29 @@ async fn schedule(peers: usize) {
 /// get through the engine's send path.
 async fn bft() {
     let n = 100;
-    for proofs in [0usize, 3] {
+    // Zero proofs is the happy path; the two formats are the assumption the
+    // per-peer figure is most sensitive to, and the budget a constrained
+    // device is held to is an absolute figure, not a ratio.
+    for (proofs, format) in [
+        (0usize, ProofFormat::Compact),
+        (3, ProofFormat::Compact),
+        (3, ProofFormat::Naive),
+    ] {
         println!(
-            "\nbft overhead: {n} peers, degree 4, {proofs} validity proofs per peer per phase\n"
+            "\nbft overhead: {n} peers, degree 4, {proofs} validity proofs per peer \
+             per phase, {} format\n",
+            format.label()
         );
         println!(
             "scheme                {}",
             render(&[]).lines().next().unwrap_or_default()
         );
-        bft_row("push (engine)", n, proofs, Engine::Push).await;
+        bft_row("push (engine)", n, proofs, format, Engine::Push).await;
         bft_row(
             "announce/pull b=50",
             n,
             proofs,
+            format,
             Engine::AnnouncePull { batch: 50 },
         )
         .await;
@@ -814,17 +862,221 @@ async fn holders() {
         holder_row(
             &format!("push       f={full_node_fraction}"),
             n,
+            0.3,
             full_node_fraction,
+            1.0,
+            DependencyAddressing::Separate,
             Engine::Push,
         )
         .await;
         holder_row(
             &format!("pull b=50  f={full_node_fraction}"),
             n,
+            0.3,
             full_node_fraction,
+            1.0,
+            DependencyAddressing::Separate,
             Engine::AnnouncePull { batch: 50 },
         )
         .await;
+    }
+}
+
+/// The other half of the same clause, and the one the workload had been
+/// answering at its ceiling. An input named in the coalition formation
+/// proposal carries a dependency every participant already holds, so
+/// separate addressing is worth something only for what is NOT named there.
+/// Sweeping the late-addition share moves the traffic between the setting
+/// the protocol describes and the ceiling every other table is measured at.
+async fn late() {
+    let n = 100;
+    println!(
+        "\nlate additions: {n} peers, degree 4, legacy_fraction 0.3, \
+         full_node_fraction 0.5, late_addition_fraction swept\n"
+    );
+    println!(
+        "scheme                {}",
+        render(&[]).lines().next().unwrap_or_default()
+    );
+    for late_addition_fraction in [0.0, 0.25, 0.5, 1.0] {
+        holder_row(
+            &format!("push       l={late_addition_fraction}"),
+            n,
+            0.3,
+            0.5,
+            late_addition_fraction,
+            DependencyAddressing::Separate,
+            Engine::Push,
+        )
+        .await;
+        holder_row(
+            &format!("pull b=50  l={late_addition_fraction}"),
+            n,
+            0.3,
+            0.5,
+            late_addition_fraction,
+            DependencyAddressing::Separate,
+            Engine::AnnouncePull { batch: 50 },
+        )
+        .await;
+    }
+}
+
+/// The counterfactual separate addressing rests on. A dependency carried
+/// inside the fragment that needs it has no identity, so no peer can decline
+/// it and no announcement is spent naming it: addressing it separately is
+/// worth exactly what declining saves, less what naming costs. Both arms, at
+/// both ends of the late-addition curve, because what a peer can decline is
+/// the whole of the difference.
+/// What arriving late costs beyond the dependency nobody holds in advance.
+///
+/// The `late` table above prices a-priori knowledge alone. An input the
+/// proposal does not name also has to be proven spendable by a key it does
+/// not name, and that proof is an object no peer can decline — so it is
+/// charged here rather than folded into the axis it would contaminate.
+async fn late_cost() {
+    let n = 100;
+    println!(
+        "\nlate addition overhead: {n} peers, degree 4, legacy_fraction 0.3, \
+         full_node_fraction 0.5, late_addition_fraction 1.0\n"
+    );
+    println!(
+        "scheme                {}",
+        render(&[]).lines().next().unwrap_or_default()
+    );
+    for overhead in [0usize, 1, 2] {
+        overhead_row(
+            &format!("push       o={overhead}"),
+            n,
+            overhead,
+            Engine::Push,
+        )
+        .await;
+        overhead_row(
+            &format!("pull b=50  o={overhead}"),
+            n,
+            overhead,
+            Engine::AnnouncePull { batch: 50 },
+        )
+        .await;
+    }
+}
+
+async fn overhead_row(label: &str, peers: usize, overhead: usize, engine: Engine) {
+    let seed = 0u64;
+    let degree = 4;
+    let workload = Workload::construction_with(ConstructionConfig {
+        peers,
+        seed,
+        legacy_fraction: 0.3,
+        full_node_fraction: 0.5,
+        late_addition_fraction: 1.0,
+        dependencies: DependencyAddressing::Separate,
+        validity_proofs_per_phase: 0,
+        late_addition_overhead: overhead,
+        proofs: ProofFormat::Compact,
+    });
+    let Some(topology) = Topology::degree_k(peers, degree, seed) else {
+        return;
+    };
+    let config = RunConfig {
+        topology,
+        workload: workload.clone(),
+        capacity: 4096,
+        queue_capacity: 8192,
+        schedule: Schedule::Staggered { publications: 1 },
+        engine,
+    };
+    let outcome = match engine {
+        Engine::Push | Engine::AsyncAnnouncePull { .. } => run(config).await,
+        _ => run_modelled(config).await,
+    };
+    note_drain(label, &outcome);
+    print!(
+        "{label:<22}{}",
+        render(&[Row::from_outcome(&outcome, degree, seed)])
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+    );
+    println!();
+}
+
+async fn bundling() {
+    let n = 100;
+    println!(
+        "\nbundled against separate: {n} peers, degree 4, legacy_fraction 0.3, \
+         full_node_fraction 0.5\n"
+    );
+    println!(
+        "scheme                {}",
+        render(&[]).lines().next().unwrap_or_default()
+    );
+    for (engine, name) in [
+        (Engine::Push, "push"),
+        (Engine::AnnouncePull { batch: 50 }, "pull b=50"),
+    ] {
+        // Bundled ignores the late-addition share: with no identity there is
+        // nothing for the proposal to have named.
+        holder_row(
+            &format!("{name:<10} bundled"),
+            n,
+            0.3,
+            0.5,
+            1.0,
+            DependencyAddressing::Bundled,
+            engine,
+        )
+        .await;
+        for late in [1.0, 0.0] {
+            holder_row(
+                &format!("{name:<10} separate l={late}"),
+                n,
+                0.3,
+                0.5,
+                late,
+                DependencyAddressing::Separate,
+                engine,
+            )
+            .await;
+        }
+    }
+}
+
+/// The cell where separate addressing has its best case: every dependency is
+/// a whole previous transaction and every peer already holds it, so declining
+/// saves the most bytes it ever can. If naming still loses here it loses
+/// everywhere.
+async fn bundling_sweep() {
+    let n = 100;
+    println!(
+        "\nbundled against separate, legacy_fraction swept: {n} peers, degree 4, \
+         full_node_fraction 1.0, late_addition_fraction 0.0, pull b=50\n"
+    );
+    println!(
+        "scheme                {}",
+        render(&[]).lines().next().unwrap_or_default()
+    );
+    for legacy in [0.0, 0.3, 0.7, 1.0] {
+        for (mode, name) in [
+            (DependencyAddressing::Bundled, "bundled     "),
+            (DependencyAddressing::Separate, "separate    "),
+            (
+                DependencyAddressing::PreviousTransactionsOnly,
+                "prev-tx only",
+            ),
+        ] {
+            holder_row(
+                &format!("{name} legacy={legacy}"),
+                n,
+                legacy,
+                1.0,
+                0.0,
+                mode,
+                Engine::AnnouncePull { batch: 50 },
+            )
+            .await;
+        }
     }
 }
 

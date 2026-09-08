@@ -601,7 +601,7 @@ mod tests {
     async fn no_full_nodes_makes_dependency_bytes_to_holders_exactly_zero() {
         use crate::run::{RunConfig, Schedule, run};
         use crate::topology::Topology;
-        use crate::workload::{ConstructionConfig, Workload};
+        use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat, Workload};
 
         let peers = 6;
         let workload = Workload::construction_with(ConstructionConfig {
@@ -609,7 +609,11 @@ mod tests {
             seed: 1,
             legacy_fraction: 0.5,
             full_node_fraction: 0.0,
+            late_addition_fraction: 1.0,
+            dependencies: DependencyAddressing::Separate,
             validity_proofs_per_phase: 0,
+            late_addition_overhead: 0,
+            proofs: ProofFormat::Compact,
         });
         let outcome = run(RunConfig {
             topology: Topology::complete(peers),
@@ -653,7 +657,7 @@ mod tests {
     async fn every_peer_a_full_node_makes_every_dependency_byte_avoidable() {
         use crate::run::{RunConfig, Schedule, run};
         use crate::topology::Topology;
-        use crate::workload::{ConstructionConfig, Workload};
+        use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat, Workload};
 
         let peers = 6;
         let workload = Workload::construction_with(ConstructionConfig {
@@ -661,7 +665,11 @@ mod tests {
             seed: 1,
             legacy_fraction: 0.5,
             full_node_fraction: 1.0,
+            late_addition_fraction: 1.0,
+            dependencies: DependencyAddressing::Separate,
             validity_proofs_per_phase: 0,
+            late_addition_overhead: 0,
+            proofs: ProofFormat::Compact,
         });
         let outcome = run(RunConfig {
             topology: Topology::complete(peers),
@@ -714,7 +722,7 @@ mod tests {
     async fn twenty_peers_with_a_mixed_config_converges_and_reports_both_figures() {
         use crate::run::{RunConfig, Schedule, run};
         use crate::topology::Topology;
-        use crate::workload::{ConstructionConfig, Workload};
+        use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat, Workload};
 
         let peers = 20;
         let workload = Workload::construction_with(ConstructionConfig {
@@ -722,7 +730,11 @@ mod tests {
             seed: 0,
             legacy_fraction: 0.3,
             full_node_fraction: 0.5,
+            late_addition_fraction: 1.0,
+            dependencies: DependencyAddressing::Separate,
             validity_proofs_per_phase: 0,
+            late_addition_overhead: 0,
+            proofs: ProofFormat::Compact,
         });
         let topology = Topology::degree_k(peers, 4, 0).expect("n=20, k=4 is feasible");
         let outcome = tokio::time::timeout(

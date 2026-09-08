@@ -62,8 +62,9 @@ pub enum Engine {
         batch: usize,
     },
     /// Push anything at or below `push_below` payload bytes, announce the
-    /// rest. The threshold is the knob the transcript's own rule predicts:
-    /// announcing pays when the identity is much smaller than the object.
+    /// rest. The threshold is the knob the size-ratio rule of thumb
+    /// predicts: announcing pays when the identity is much smaller than the
+    /// object.
     Hybrid {
         /// Identities per announcement or request frame.
         batch: usize,
@@ -804,7 +805,7 @@ mod tests {
     use crate::run::Schedule;
     use crate::run::run;
     use crate::topology::Topology;
-    use crate::workload::ConstructionConfig;
+    use crate::workload::{ConstructionConfig, DependencyAddressing, ProofFormat};
 
     fn cell(peers: usize, degree: usize, seed: u64, engine: Engine) -> RunConfig {
         RunConfig {
@@ -818,7 +819,11 @@ mod tests {
                 seed,
                 legacy_fraction: 0.3,
                 full_node_fraction: 0.5,
+                late_addition_fraction: 1.0,
+                dependencies: DependencyAddressing::Separate,
                 validity_proofs_per_phase: 0,
+                late_addition_overhead: 0,
+                proofs: ProofFormat::Compact,
             }),
             capacity: 512,
             queue_capacity: 4096,
