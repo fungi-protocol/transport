@@ -13,6 +13,8 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -50,10 +52,21 @@ use crate::isolation::CircuitIsolationId;
 ///   process that lives on); [`shutdown`](GossipBroadcast::shutdown)
 ///   instead drains locally accepted work, joins every task, and reports a
 ///   forward or task failure. Success is not remote delivery confirmation.
-///   Draining waits on the peers: a peer that stops reading is a drain that
-///   never finishes, so a caller that cannot wait forever bounds the call
-///   externally — the same stance the [`Channel`](crate::Channel) contract
-///   takes on timeouts.
+///   Draining waits on the peers, and nothing here bounds that wait: no
+///   duration distinguishes a slow peer from a stopped one, so a node that
+///   gave up on its own schedule would be deciding what it cannot observe.
+///   [`begin_shutdown`](GossipBroadcast::begin_shutdown) hands back the
+///   drain instead, so a caller that cannot wait puts its own clock around
+///   [`finish`](Draining::finish) and then asks
+///   [`abandon`](Draining::abandon) which links were left owing
+///   ([`NotFlushed`](GossipError::NotFlushed)). A group that ends BADLY
+///   releases its own links: it has already reported losing convergence, so
+///   a forward parked on a peer is owed to nobody and is dropped, which
+///   costs nothing now that abandoning a send leaves the stream well formed.
+///   A group that ends cleanly still flushes what it accepted. A link the
+///   caller abandons is detached rather than cancelled, because that peer is
+///   still there and may yet take it, and a late arrival is harmless: `seen`
+///   discards what is already held.
 /// - The `seen` set holds every distinct message for the channel's life.
 /// - Constructed with zero channels, sends are vacuously `Ok` and `recv`
 ///   reports the channel dead (mirroring the in-memory group); a group
@@ -130,6 +143,19 @@ pub enum GossipError {
         /// Diagnostic reported by the P2P channel.
         reason: String,
     },
+    /// A link was still delivering what it already owed when the caller's
+    /// drain budget ran out.
+    ///
+    /// Raised by the link itself when the group ended badly, and by
+    /// [`Draining::abandon`] when the caller stopped waiting on a group that
+    /// had not. In the second case the task is left running rather than
+    /// cancelled: the peer is still there and may yet take what it is owed,
+    /// and a late arrival is harmless because a message already held is
+    /// discarded on sight.
+    NotFlushed {
+        /// Stable index of the link that had not finished.
+        link: usize,
+    },
     /// An internal task panicked or was cancelled.
     TaskFailed {
         /// Tokio join diagnostic.
@@ -147,6 +173,9 @@ impl fmt::Display for GossipError {
             Self::AllLinksEnded => write!(f, "every gossip link ended"),
             Self::ForwardFailed { link, reason } => {
                 write!(f, "gossip forward on link {link} failed: {reason}")
+            }
+            Self::NotFlushed { link } => {
+                write!(f, "gossip link {link} did not finish flushing")
             }
             Self::TaskFailed { reason } => write!(f, "gossip task failed: {reason}"),
         }
@@ -188,6 +217,12 @@ impl GossipBroadcast {
                 tasks: Vec::new(),
             };
         }
+        // Raised when the hub ends the group because it could no longer
+        // preserve convergence, and NOT when the consumer simply closed: a
+        // clean shutdown still owes its peers what it accepted, so only a
+        // terminal group releases a link parked in a send.
+        let terminal = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(tokio::sync::Notify::new());
         let (outbound_tx, outbound_rx) = mpsc::channel(config.queue_capacity);
         let (to_hub, from_links) = mpsc::channel::<LinkEvent>(config.queue_capacity);
         let mut link_cmds = Vec::with_capacity(channels.len());
@@ -196,6 +231,8 @@ impl GossipBroadcast {
             let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(config.queue_capacity);
             link_cmds.push(cmd_tx);
             let to_hub = to_hub.clone();
+            let terminal = terminal.clone();
+            let released = released.clone();
             tasks.push(tokio::spawn(async move {
                 let (mut tx, mut rx) = ch.split();
                 let to_hub_out = to_hub.clone();
@@ -208,7 +245,19 @@ impl GossipBroadcast {
                     // makes this the flush path: everything already queued is
                     // delivered before the loop sees the close.
                     while let Some(msg) = cmd_rx.recv().await {
-                        if let Err(error) = tx.send(&msg).await {
+                        // A forward is owed to a peer only while the group
+                        // still exists. Once it does not, waiting on that
+                        // peer is waiting on nobody, so the send is dropped:
+                        // safe now that abandoning one leaves the stream well
+                        // formed rather than half a frame.
+                        let sent = tokio::select! {
+                            biased;
+                            () = group_ended(&terminal, &released) => {
+                                return Err(GossipError::NotFlushed { link: i });
+                            }
+                            result = tx.send(&msg) => result,
+                        };
+                        if let Err(error) = sent {
                             let failure = GossipError::ForwardFailed {
                                 link: i,
                                 reason: error.to_string(),
@@ -253,23 +302,40 @@ impl GossipBroadcast {
                     // receiving half costs nothing — `recv` is cancel-safe,
                     // and there is no longer a hub to deliver into.
                     futures_util::future::Either::Left((sent, _)) => sent,
-                    // The receive side ended first. Let the sending half run
-                    // to completion so a forward this link still owes its
-                    // peer is not abandoned mid-flight.
-                    futures_util::future::Either::Right((received, sending)) => {
-                        let sent = sending.await;
-                        received.and(sent)
-                    }
+                    // The receive side ended first, which means this link is
+                    // half dead: either the peer stopped talking to us, or our
+                    // own hub is gone. A peer that has stopped sending is not
+                    // going to keep draining either, so waiting for a forward
+                    // to finish is waiting on the very thing that ended. Two
+                    // links in this state, each parked in a send the other
+                    // would have to drain, is a cycle nothing can break.
+                    //
+                    // The pending forward is therefore dropped rather than
+                    // awaited. That costs nothing on the wire now that
+                    // abandoning a send leaves the frame boundary intact, and
+                    // a message lost here is one the group can no longer
+                    // converge on anyway.
+                    futures_util::future::Either::Right((received, _sending)) => received,
                 }
             }));
         }
         drop(to_hub);
-        tasks.push(tokio::spawn(hub(
-            outbound_rx,
-            from_links,
-            link_cmds,
-            incoming_tx,
-        )));
+        tasks.push(tokio::spawn(async move {
+            // A guard rather than a branch after the call: a hub that panics
+            // is as terminal as one that returns an error, and leaving the
+            // links parked would turn a crash here into a hang somewhere
+            // else.
+            let mut release = ReleaseLinks {
+                terminal,
+                released,
+                armed: true,
+            };
+            let result = hub(outbound_rx, from_links, link_cmds, incoming_tx).await;
+            // Only a group that ended badly releases the links; a clean end
+            // leaves them flushing what they owe.
+            release.armed = result.is_err();
+            result
+        }));
         Self {
             outbound: Some(outbound_tx),
             incoming,
@@ -297,6 +363,19 @@ impl GossipBroadcast {
     /// takes, so against a peer that has stopped reading this never returns.
     /// Bound it externally if that matters.
     pub async fn shutdown(self) -> Result<(), GossipError> {
+        let mut draining = self.begin_shutdown();
+        draining.finish().await
+    }
+
+    /// Stop accepting work and hand back the drain, without waiting for it.
+    ///
+    /// Splits the two things ending a node means: releasing it locally, which
+    /// is immediate, and delivering what it already owes its peers, which is
+    /// not bounded by anything this crate knows. No deadline is taken here
+    /// and none is applied: how long to wait is the caller's, and a caller
+    /// that gives up can still ask [`Draining::abandon`] which links were
+    /// left owing.
+    pub fn begin_shutdown(self) -> Draining {
         let Self {
             outbound,
             incoming,
@@ -304,30 +383,130 @@ impl GossipBroadcast {
             max_msg_len: _,
         } = self;
         // Dropping the sender lets the hub drain what is queued and exit;
-        // `incoming` stays alive until the join so the consumer side does
-        // not disappear while locally accepted work is being drained.
+        // `incoming` stays alive until the drain ends so the consumer side
+        // does not disappear while locally accepted work is being drained.
         drop(outbound);
-        let mut failure = None;
-        for task in tasks {
-            match task.await {
-                Ok(Ok(())) => {}
-                // A peer may close after it has converged and begun its own
-                // shutdown. That ends this fixed group but is not a failure
-                // of our local drain; recv already exposes the closure while
-                // the node is running.
-                Ok(Err(GossipError::LinkClosed { .. } | GossipError::AllLinksEnded)) => {}
-                Ok(Err(error)) => {
-                    failure.get_or_insert(error);
-                }
-                Err(error) => {
-                    failure.get_or_insert(GossipError::TaskFailed {
-                        reason: error.to_string(),
-                    });
-                }
+        // Link tasks are spawned first, in link order, and the hub last, so
+        // a task's position names the link it drives.
+        let links = tasks.len().saturating_sub(1);
+        Draining {
+            tasks: tasks.into_iter().map(Some).collect(),
+            links,
+            failure: None,
+            incoming,
+        }
+    }
+}
+
+/// A node that has stopped accepting work and is delivering what it owes.
+///
+/// Waiting is [`finish`](Draining::finish) and giving up is
+/// [`abandon`](Draining::abandon); nothing here decides between them, because
+/// no duration distinguishes a slow peer from a stopped one. A caller that
+/// cannot wait puts its own clock around `finish` and calls `abandon` after,
+/// which is why `finish` borrows rather than consumes.
+#[derive(Debug)]
+pub struct Draining {
+    /// `None` once joined, so a cancelled `finish` loses no result.
+    tasks: Vec<Option<tokio::task::JoinHandle<Result<(), GossipError>>>>,
+    /// How many of `tasks` drive a link; the rest is the hub.
+    links: usize,
+    failure: Option<GossipError>,
+    incoming: mpsc::Receiver<Vec<u8>>,
+}
+
+impl Draining {
+    /// Wait for every task to finish delivering.
+    ///
+    /// Unbounded on purpose: delivery may take arbitrarily long, and a node
+    /// that gave up on its own schedule would be deciding something it cannot
+    /// observe. Cancel-safe, so a caller may drop the future and still
+    /// [`abandon`](Self::abandon) what is left.
+    pub async fn finish(&mut self) -> Result<(), GossipError> {
+        for index in 0..self.tasks.len() {
+            let Some(handle) = self.tasks[index].as_mut() else {
+                continue;
             };
+            let joined = handle.await;
+            self.tasks[index] = None;
+            self.record(joined);
+        }
+        self.failure.clone().map_or(Ok(()), Err)
+    }
+
+    /// Stop waiting, naming the first link still owing its peer.
+    ///
+    /// The unfinished tasks are DETACHED, never cancelled: `send` is not
+    /// cancel-safe, so dropping one mid-frame would leave a partial frame on
+    /// the wire. A detached forward that lands later is harmless, because a
+    /// message already held is discarded on sight.
+    pub fn abandon(self) -> Result<(), GossipError> {
+        let Self {
+            tasks,
+            links,
+            mut failure,
+            incoming,
+        } = self;
+        for (index, handle) in tasks.into_iter().enumerate() {
+            if handle.is_some() && index < links {
+                failure.get_or_insert(GossipError::NotFlushed { link: index });
+            }
         }
         drop(incoming);
         failure.map_or(Ok(()), Err)
+    }
+
+    fn record(&mut self, joined: Result<Result<(), GossipError>, tokio::task::JoinError>) {
+        match joined {
+            Ok(Ok(())) => {}
+            // A peer may close after it has converged and begun its own
+            // shutdown. That ends this fixed group but is not a failure of
+            // our local drain; recv already exposes the closure while the
+            // node is running.
+            Ok(Err(GossipError::LinkClosed { .. } | GossipError::AllLinksEnded)) => {}
+            Ok(Err(error)) => {
+                self.failure.get_or_insert(error);
+            }
+            Err(error) => {
+                self.failure.get_or_insert(GossipError::TaskFailed {
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Frees every link parked in a send once the hub is gone, unless the hub
+/// disarmed it by ending cleanly. Held by the hub's task so it fires however
+/// that task ends, a panic included.
+struct ReleaseLinks {
+    terminal: Arc<AtomicBool>,
+    released: Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl Drop for ReleaseLinks {
+    fn drop(&mut self) {
+        if self.armed {
+            self.terminal.store(true, Ordering::Release);
+            self.released.notify_waiters();
+        }
+    }
+}
+
+/// Resolves only once the group has ended badly, and never merely because
+/// the hub finished. A plain notification would be lost if it landed between
+/// the flag check and the wait, so the waiter is registered first and the
+/// flag read after.
+async fn group_ended(terminal: &AtomicBool, released: &tokio::sync::Notify) {
+    loop {
+        let waiting = released.notified();
+        tokio::pin!(waiting);
+        waiting.as_mut().enable();
+        if terminal.load(Ordering::Acquire) {
+            return;
+        }
+        waiting.await;
     }
 }
 
@@ -962,6 +1141,133 @@ mod tests {
                 output: QueueKind::Consumer
             })
         ));
+    }
+
+    // The same ending, with one forward already parked on the wire. A link
+    // sitting inside `SendHalf::send` cannot see the command queue close, so
+    // it has to be told: a group that ends badly releases its links, and the
+    // parked send is dropped rather than waited on. Without that the drain
+    // joins a task only the peer could free.
+    //
+    #[tokio::test]
+    async fn a_terminal_group_does_not_leave_shutdown_waiting_on_a_parked_forward() {
+        // One slot each way, so the second forward has nowhere to go.
+        let (ab, mut ba) = duplex(MemConfig {
+            capacity: Some(1),
+            ..MemConfig::default()
+        });
+        let mut a = gossip_with(vec![ab], GossipConfig { queue_capacity: 1 });
+
+        // The first forward fills the peer's slot; the second parks in the
+        // send, because nothing on this side ever reads `ba`.
+        for message in [b"one".as_slice(), b"two"] {
+            a.send(message).await.expect("the hub accepts both");
+            tokio::task::yield_now().await;
+        }
+
+        // Now end the group the way the test above does, by overflowing the
+        // consumer queue nobody is draining.
+        for message in [b"three".as_slice(), b"four", b"five"] {
+            let _ = ba.send(message).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            a.recv().await.is_ok() && a.recv().await.is_err(),
+            "the group has ended, which is the precondition and not the defect"
+        );
+
+        // The group has ended, so the forward parked on the wire is owed to
+        // nobody: the link stops waiting on its own and names itself. No
+        // clock is involved, and the caller does not have to give up first.
+        let mut draining = a.begin_shutdown();
+        let ended = tokio::time::timeout(Duration::from_secs(5), draining.finish())
+            .await
+            .expect("a terminal group releases its links without anyone giving up");
+
+        assert!(
+            matches!(ended, Err(GossipError::NotFlushed { link: 0 })),
+            "the drain must name the link it left owing its peer, got {ended:?}"
+        );
+    }
+
+    // The other half of the same hazard, and the one a whole-group run hits:
+    // here the hub ends CLEANLY, so nothing is released on its account, and
+    // the link learns the group is over only when its own receive half fails
+    // to hand a message on. A link in that state has a peer that has stopped
+    // talking to it, so waiting for a parked forward waits on the very thing
+    // that ended. Two such links, each parked in a send the other would drain,
+    // is a cycle with no way out.
+    #[tokio::test]
+    async fn a_link_whose_receive_half_ended_does_not_wait_on_its_parked_forward() {
+        let (ab, mut ba) = duplex(MemConfig {
+            capacity: Some(1),
+            ..MemConfig::default()
+        });
+        let mut a = gossip_with(vec![ab], GossipConfig { queue_capacity: 4 });
+
+        // The first forward fills the peer's slot, the second parks: nothing
+        // on this side ever reads `ba`.
+        for message in [b"one".as_slice(), b"two"] {
+            a.send(message).await.expect("the hub accepts both");
+            tokio::task::yield_now().await;
+        }
+
+        // A CLEAN end: dropping the caller's handle, not a failure. The hub
+        // exits with Ok, so no link is released on its account.
+        let mut draining = a.begin_shutdown();
+        tokio::task::yield_now().await;
+
+        // The peer speaks once more. The receive half now has nowhere to hand
+        // it, which is how this link learns the group is gone.
+        let _ = ba.send(b"from the peer").await;
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), draining.finish())
+            .await
+            .expect("a half-dead link stops waiting instead of joining forever");
+        let _ = ended;
+    }
+
+    // The oracle the whole ladder is anchored on: what releases the link is
+    // an event, never a clock, and what the peer reads is always whole. A
+    // group that ended badly has already reported losing convergence, so it
+    // owes that peer nothing more; the complement, that a CLEAN end still
+    // flushes, is `shutdown_flushes_pending_sends`.
+    #[tokio::test]
+    async fn a_terminal_group_releases_its_links_without_tearing_the_stream() {
+        let (ab, mut ba) = duplex(MemConfig {
+            capacity: Some(1),
+            ..MemConfig::default()
+        });
+        let mut a = gossip_with(vec![ab], GossipConfig { queue_capacity: 1 });
+
+        for message in [b"one".as_slice(), b"two"] {
+            a.send(message).await.expect("the hub accepts both");
+            tokio::task::yield_now().await;
+        }
+        for message in [b"three".as_slice(), b"four", b"five"] {
+            let _ = ba.send(message).await;
+            tokio::task::yield_now().await;
+        }
+
+        // No clock anywhere: the drain returns because the group ended, and
+        // it names the link that was still parked.
+        let mut draining = a.begin_shutdown();
+        let ended = tokio::time::timeout(Duration::from_secs(5), draining.finish())
+            .await
+            .expect("an event releases the link, so nothing here waits on time");
+        assert!(
+            matches!(ended, Err(GossipError::NotFlushed { link: 0 })),
+            "the parked forward must be named, got {ended:?}"
+        );
+
+        // The peer reads arbitrarily late and gets whole messages: the
+        // forward that completed, and then a clean end. Never a fragment of
+        // the one that was released.
+        assert_eq!(ba.recv().await.unwrap(), b"one");
+        assert!(
+            ba.recv().await.is_err(),
+            "a released link closes cleanly rather than leaving a fragment"
+        );
     }
 
     // Two-phase wiring over the mem transport: B starts (publishing its

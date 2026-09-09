@@ -464,10 +464,14 @@ async fn collect_gossip(
 }
 
 async fn shutdown_gossip(node: GossipBroadcast) -> Result<(), String> {
-    tokio::time::timeout(STEP_TIMEOUT, node.shutdown())
-        .await
-        .map_err(|_| "shutdown drain timed out".to_string())?
-        .map_err(|e| format!("shutdown drain failed: {e}"))
+    // The clock is this harness's, not the transport's; giving up still
+    // names the link left owing.
+    let mut draining = node.begin_shutdown();
+    match tokio::time::timeout(STEP_TIMEOUT, draining.finish()).await {
+        Ok(result) => result,
+        Err(_) => draining.abandon(),
+    }
+    .map_err(|e| format!("shutdown drain failed: {e}"))
 }
 
 /// Drive the parsed command over a plugin subprocess: spawn `cli.plugin` and
