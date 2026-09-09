@@ -1253,7 +1253,11 @@ async fn pump_backend<C: SplitChannel>(
     let sending = async move {
         loop {
             // A stop may cancel only this idle queue receive. Once a backend
-            // send starts, it is always driven to completion.
+            // send starts it is driven to completion, because a caller is
+            // holding the reply channel for its result; abandoning the send
+            // would be answering nobody. Since `SendHalf::send` became
+            // cancel-safe this is a choice about who gets told, not a
+            // constraint about what the stream would look like.
             let queued = tokio::select! {
                 _ = &mut stop => return,
                 queued = sends.recv() => queued,
@@ -1294,8 +1298,12 @@ async fn pump_backend<C: SplitChannel>(
         // Sending ended cleanly with its command queue, or on a fatal send.
         // The receive future is cancel-safe and may be discarded.
         Finished::Sending => {}
-        // Receiving ended first. Wake an idle sender, but never cancel an
-        // in-flight backend send: its future is not cancel-safe.
+        // Receiving ended first. Wake an idle sender, but let an in-flight
+        // backend send finish so its caller learns the outcome. A peer that
+        // has stopped reading can still park that send: the same shape the
+        // gossip engine had, less reachable here because a dead receive half
+        // usually means a dead stream, which fails the next send outright.
+        // Bounding it is its own change, with its own reproduction.
         Finished::Receiving => {
             let _ = stop_sending.send(());
             sending.await;

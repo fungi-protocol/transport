@@ -71,6 +71,12 @@ async fn mutual_bursts_converge_over_capnp() {
 /// Proves the C1 fix: a dropped `recv` future loses no message across the Send
 /// bridge — the actor's front-buffer holds a message pulled for an abandoned
 /// caller until the next `recv` claims it.
+///
+/// There is deliberately no sending counterpart here. `testkit::send_is_
+/// cancel_safe` catches a torn length-prefixed frame, and a send over this
+/// bridge is an rpc call rather than a byte write: capnp-rpc frames its own
+/// messages, so abandoning one cannot leave half of ours on a stream. Adding
+/// it would pin capnp-rpc's buffering, not this crate's behaviour.
 #[tokio::test]
 async fn cancel_safe_over_capnp() {
     let (capnp_a, capnp_b) = crossed_capnp_pair(8);

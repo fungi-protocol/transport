@@ -33,11 +33,22 @@ pub struct FramedChannel<S> {
     reader: ReadHalf<S>,
     max_msg_len: usize,
     read: ReadState,
+    write: WriteState,
     // Set on protocol violation or a write error (torn frame); every later
     // send and recv returns Closed. Shared rather than owned by one
     // direction: either direction can poison, and both must see it — that
     // is what keeps one object one fate once the halves are split apart.
     poisoned: AtomicBool,
+}
+
+/// Partial-frame write state (cancel safety: lives in the channel, not in
+/// the `send` future). An abandoned send leaves the rest of its frame here,
+/// and the next send finishes it before starting its own, so no send ever
+/// writes a fresh frame over bytes the peer is still counting.
+#[derive(Debug, Default)]
+struct WriteState {
+    frame: Vec<u8>,
+    written: usize,
 }
 
 /// Partial-frame read state (cancel safety: lives in the channel, not in the
@@ -77,6 +88,7 @@ where
             reader,
             max_msg_len,
             read: ReadState::default(),
+            write: WriteState::default(),
             poisoned: AtomicBool::new(false),
         }
     }
@@ -106,6 +118,7 @@ fn map_recv_io(e: std::io::Error) -> RecvError {
 /// so the two can never drift.
 async fn send_frame<W>(
     writer: &mut W,
+    state: &mut WriteState,
     max_msg_len: usize,
     poisoned: &AtomicBool,
     msg: &[u8],
@@ -124,10 +137,18 @@ where
     // (`TooLarge` above never touches the stream — the one recoverable send
     // error.)
     let result: Result<(), std::io::Error> = async {
+        // Whatever an abandoned send left goes out first: the peer is
+        // counting the bytes its prefix announced, and a fresh frame written
+        // over them is read as their payload.
+        flush_pending(writer, state).await?;
         // max_msg_len fits in u32 (checked in new), so msg.len() does too.
-        let prefix = (msg.len() as u32).to_be_bytes();
-        writer.write_all(&prefix).await?;
-        writer.write_all(msg).await?;
+        state.frame.clear();
+        state
+            .frame
+            .extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        state.frame.extend_from_slice(msg);
+        state.written = 0;
+        flush_pending(writer, state).await?;
         writer.flush().await
     }
     .await;
@@ -135,6 +156,24 @@ where
         poisoned.store(true, Ordering::Relaxed);
         map_send_io(e)
     })
+}
+
+/// Write what is left of the pending frame, recording progress in `state`
+/// after every accepted chunk so an abandoned future loses nothing.
+async fn flush_pending<W>(writer: &mut W, state: &mut WriteState) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Send + Unpin,
+{
+    while state.written < state.frame.len() {
+        let wrote = writer.write(&state.frame[state.written..]).await?;
+        if wrote == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
+        state.written += wrote;
+    }
+    state.frame.clear();
+    state.written = 0;
+    Ok(())
 }
 
 /// The whole read path, shared by the unified channel and its receiving
@@ -200,7 +239,13 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin,
 {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
-        send_frame(&mut self.writer, self.max_msg_len, &self.poisoned, msg)
+        send_frame(
+            &mut self.writer,
+            &mut self.write,
+            self.max_msg_len,
+            &self.poisoned,
+            msg,
+        )
     }
 
     fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, RecvError>> + Send {
@@ -217,6 +262,7 @@ where
 #[derive(Debug)]
 pub struct FramedSendHalf<'a, S> {
     writer: &'a mut WriteHalf<S>,
+    write: &'a mut WriteState,
     max_msg_len: usize,
     poisoned: &'a AtomicBool,
 }
@@ -236,7 +282,13 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin,
 {
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send {
-        send_frame(self.writer, self.max_msg_len, self.poisoned, msg)
+        send_frame(
+            self.writer,
+            self.write,
+            self.max_msg_len,
+            self.poisoned,
+            msg,
+        )
     }
 }
 
@@ -266,6 +318,7 @@ where
         (
             FramedSendHalf {
                 writer: &mut self.writer,
+                write: &mut self.write,
                 max_msg_len: self.max_msg_len,
                 poisoned: &self.poisoned,
             },
@@ -399,6 +452,20 @@ mod tests {
     async fn recv_is_cancel_safe() {
         let (a, b) = framed_pair(DEFAULT_MAX_MSG_LEN);
         testkit::recv_is_cancel_safe(a, b).await;
+    }
+
+    #[tokio::test]
+    async fn send_is_cancel_safe() {
+        // A pipe small enough that a handful of frames fill it, so the send
+        // that follows genuinely blocks part way through writing and is
+        // abandoned mid-frame. The default 64 KiB pipe would swallow
+        // everything and prove nothing.
+        let (a, b) = tokio::io::duplex(64);
+        let a = FramedChannel::new(a, DEFAULT_MAX_MSG_LEN);
+        let b = FramedChannel::new(b, DEFAULT_MAX_MSG_LEN);
+        // Five bytes per single-byte frame, so twelve fill the 64-byte pipe
+        // to sixty and leave the next frame no room to finish.
+        testkit::send_is_cancel_safe(a, b, 12).await;
     }
 
     use crate::error::RecvError;

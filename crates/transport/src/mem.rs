@@ -614,6 +614,15 @@ mod tests {
         testkit::recv_is_cancel_safe(a, b).await;
     }
 
+    #[tokio::test]
+    async fn send_is_cancel_safe() {
+        let (a, b) = duplex(MemConfig {
+            capacity: Some(2),
+            ..MemConfig::default()
+        });
+        testkit::send_is_cancel_safe(a, b, 2).await;
+    }
+
     // One slot per direction, so every send after the first waits on the
     // peer: the shape that deadlocks a pair driven through `Channel` alone.
     #[tokio::test]

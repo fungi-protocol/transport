@@ -72,7 +72,12 @@ pub trait Channel: Send {
 }
 
 /// The sending direction of a [`SplitChannel`]. Same contract as
-/// [`Channel::send`], including that it is NOT cancel-safe.
+/// [`Channel::send`], including its cancel safety: abandoning a `send`
+/// leaves the stream well formed, so the peer never reads half a message as
+/// the body of the next one. It says nothing about DELIVERY, which stays
+/// unspecified for an abandoned send; an implementation may finish the
+/// frame on the following call or never send it at all. Dedup belongs to
+/// the layer above, which is what makes either outcome safe.
 pub trait SendHalf: Send {
     /// Send one opaque message to the peer.
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), SendError>> + Send;

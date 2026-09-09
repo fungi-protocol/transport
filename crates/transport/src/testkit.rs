@@ -40,6 +40,55 @@ pub async fn recv_is_cancel_safe<C: Channel>(mut a: C, mut b: C) {
     assert_eq!(b.recv().await.unwrap(), b"m1");
 }
 
+/// One receive, bounded, because the failure the send item exists to catch is
+/// a peer waiting on a length that was never announced. An unbounded read
+/// would turn that into a hung suite instead of a failed assertion.
+async fn bounded_recv<C: Channel>(b: &mut C) -> Vec<u8> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), b.recv())
+        .await
+        .expect("a torn frame leaves the peer waiting on a length nobody will write")
+        .expect("the channel must stay usable after a send is abandoned")
+}
+
+/// An abandoned send future must not leave a torn frame on the wire.
+///
+/// Cancel safety here is about the STREAM, not about delivery: whether the
+/// abandoned message reaches the peer is unspecified, but whatever the peer
+/// reads must be a whole message. `fill` is how many sends saturate the link,
+/// which only the caller knows, and without saturation nothing is abandoned
+/// and the item proves nothing.
+pub async fn send_is_cancel_safe<C: Channel>(mut a: C, mut b: C, fill: usize) {
+    for i in 0..fill {
+        tokio::time::timeout(std::time::Duration::from_secs(2), a.send(&[i as u8]))
+            .await
+            .expect("fill must fit the link; a fill that blocks is a caller's miscount")
+            .unwrap();
+    }
+    let abandoned =
+        tokio::time::timeout(std::time::Duration::from_millis(5), a.send(b"abandoned")).await;
+    assert!(
+        abandoned.is_err(),
+        "fill must saturate the link, or nothing was abandoned"
+    );
+
+    for i in 0..fill {
+        assert_eq!(bounded_recv(&mut b).await, &[i as u8]);
+    }
+    a.send(b"after").await.unwrap();
+
+    // Whatever the peer reads from here has to be a whole message: the
+    // abandoned one if it completed, and then the one written after it.
+    let mut seen = Vec::new();
+    while seen.last().map(Vec::as_slice) != Some(b"after".as_slice()) {
+        let message = bounded_recv(&mut b).await;
+        assert!(
+            message.as_slice() == b"abandoned" || message.as_slice() == b"after",
+            "the peer read something that was never written whole: {message:?}"
+        );
+        seen.push(message);
+    }
+}
+
 /// A message larger than the transport's declared maximum is rejected with
 /// [`SendError::TooLarge`], never silently truncated or accepted.
 pub async fn too_large<C: Channel>(mut a: C, max: usize) {
