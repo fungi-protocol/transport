@@ -36,7 +36,8 @@
 //!   [`gossip::GossipBroadcast`] the production one.
 //!
 //! Real transports live in their own crates: `fungi-transport-socks5h`
-//! (external tor daemon) and `fungi-transport-arti` (in-process arti).
+//! (external tor daemon), `fungi-transport-arti` (in-process arti), and
+//! `fungi-transport-ohttp` (append-only OHTTP mailboxes).
 
 pub mod addr;
 pub mod channel;

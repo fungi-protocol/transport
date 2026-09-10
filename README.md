@@ -20,6 +20,7 @@ canonical wire-message layer.
 | [`fungi-transport`](crates/transport) | Channel traits, framing adapters, in-memory channels, and gossip. |
 | [`fungi-transport-socks5h`](crates/transport-socks5h) | Tor backend over an **external** tor daemon. |
 | [`fungi-transport-arti`](crates/transport-arti) | Tor backend with Tor running **in-process** (Arti). |
+| [`fungi-transport-ohttp`](crates/transport-ohttp) | P2P channels over HPKE-encrypted, append-only OHTTP mailboxes. |
 | [`fungi-transport-capnp`](crates/transport-capnp) | Cap'n Proto plugin layer to run a backend out-of-process. |
 | [`fungi-wire`](crates/wire) | Candidate canonical typed-message encoding, logical message IDs, and grow-only message sets. |
 | [`fungi-session`](crates/session) | Connection-local protocol-session binding and validation before closed-group gossip. |
