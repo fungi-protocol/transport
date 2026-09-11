@@ -1,4 +1,4 @@
-//! Arti (in-process Tor) backend for the fungi P2P datagram channel.
+//! Interactive Arti (in-process Tor) backend for the fungi P2P datagram channel.
 //!
 //! The second real implementation of the [`fungi_transport`] traits: Tor
 //! runs inside the process via `arti-client` — no external daemon. Each

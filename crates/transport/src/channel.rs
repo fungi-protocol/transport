@@ -1,4 +1,4 @@
-//! The channel abstraction for exchanging opaque messages with a peer.
+//! The channel abstraction for exchanging opaque messages with a logical peer.
 //! `Stream` does not appear in the trait interface; [`into_stream`] adapts a
 //! [`Channel`] into one for consumers who prefer it.
 //!
@@ -20,7 +20,7 @@ use crate::error::{ConnectError, RecvError, SendError};
 use crate::isolation::CircuitIsolationId;
 use crate::sender::SenderId;
 
-/// A datagram channel to ONE peer: opaque bytes, one message per call.
+/// A datagram channel to ONE logical peer: opaque bytes, one message per call.
 ///
 /// Contract:
 /// - `Ok(())` from `send` means the transport accepted the message and will

@@ -1,4 +1,4 @@
-//! Channel backend over an external tor daemon.
+//! Interactive channel backend over an external tor daemon.
 //!
 //! The daemon does all Tor work; this crate speaks two local protocols to
 //! it: SOCKS5h on the socks port to open streams to `.onion` peers (the

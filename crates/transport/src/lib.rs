@@ -1,13 +1,13 @@
 //! The P2P datagram channel abstraction for the Fungi protocol.
 //!
-//! A channel is a connection to ONE peer moving opaque byte messages, one
-//! message per call. No delivery ordering across channels, no deduplication,
-//! no framing, no per-message anonymity semantics — those belong to other
-//! layers. The one identity contract this crate does own is at
-//! connection-opening: dialing is initiator-anonymous, and the address
-//! authenticates the responder (see [`Connector`] and [`Listener`]).
+//! A channel exchanges opaque byte messages with ONE logical peer, one message
+//! per call. No delivery ordering across channels, no deduplication, no
+//! framing, no per-message anonymity semantics — those belong to other layers.
+//! The one identity contract this crate does own is at connection-opening:
+//! dialing is initiator-anonymous, and the address authenticates the responder
+//! (see [`Connector`] and [`Listener`]).
 //!
-//! The API is [`Channel`] (send/recv one connected peer), [`Connector`]
+//! The API is [`Channel`] (send/recv one logical peer), [`Connector`]
 //! (open new channels) and [`Listener`] (accept inbound ones), plus
 //! [`into_stream`] to adapt a `Channel` into a `Stream` where that's more
 //! convenient. [`mem`] is an in-memory implementation for tests and for
@@ -34,6 +34,15 @@
 //!   over P2P channels, a server-side broadcast API — and consumers cannot
 //!   tell the difference; [`mem::group`] is the in-memory one,
 //!   [`gossip::GossipBroadcast`] the production one.
+//!
+//! # Delivery models
+//!
+//! A channel may use interactive delivery, such as a Tor stream, or
+//! connectionless delivery, such as an OHTTP or Nostr mailbox. Interactive
+//! peers normally drive an established link concurrently. Connectionless
+//! protocol peers need not be online at the same time: an intermediate service
+//! stores messages for later retrieval. Both models satisfy the same
+//! message-oriented [`Channel`] contract.
 //!
 //! Real transports live in their own crates: `fungi-transport-socks5h`
 //! (external tor daemon), `fungi-transport-arti` (in-process arti), and

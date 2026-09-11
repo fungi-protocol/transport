@@ -18,6 +18,20 @@ async fn conforms_to_message_contract() {
     testkit::recv_is_cancel_safe(a, b).await;
 }
 
+/// Publishes before the receiver channel exists, then constructs it from its
+/// out-of-band link material and retrieves the retained message.
+#[tokio::test]
+async fn receiver_can_start_after_publication() {
+    let fixture = Fixture::new().await;
+    let mut sender = OhttpChannel::new(fixture.config(true), fixture.client()).unwrap();
+
+    sender.send(b"stored while offline").await.unwrap();
+    drop(sender);
+
+    let mut receiver = OhttpChannel::new(fixture.config(false), fixture.client()).unwrap();
+    assert_eq!(receiver.recv().await.unwrap(), b"stored while offline");
+}
+
 /// Sends and receives 20 messages in both directions concurrently to detect split-channel deadlocks across pages.
 #[tokio::test]
 async fn concurrent_bursts_cross_page_boundaries() {

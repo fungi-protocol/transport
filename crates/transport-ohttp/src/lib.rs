@@ -1,12 +1,16 @@
-//! P2P channels over the append-only mailbox.
+//! Connectionless P2P channels over the append-only mailbox.
 //!
 //! Construction is out of band: both peers need mailbox IDs, distinct HPKE
 //! keys, and a fresh shared [`LinkSecret`] for each channel generation. The
-//! secret authenticates the link, not a public sender identity. Mailbox reads
-//! are non-destructive; unrelated entries are skipped and accepted messages
-//! retain their exact bytes. No ordering, deduplication, durable cursor, or
-//! peer-close detection is promised. Reopening requires fresh link material;
-//! do not reuse a previous generation's secret with session binding.
+//! secret authenticates the link, not a public sender identity.
+//!
+//! Protocol peers need not be online at the same time: the directory retains
+//! an accepted append for the recipient to retrieve later, subject to its
+//! availability and retention policy. Mailbox reads are non-destructive;
+//! unrelated entries are skipped and accepted messages retain their exact
+//! bytes. No ordering, deduplication, durable cursor, or peer-close detection
+//! is promised. Reopening requires fresh link material; do not reuse a previous
+//! generation's secret with session binding.
 //!
 //! This backend implements [`Channel`] and [`SplitChannel`]. HPKE hides
 //! payloads from the gateway, while OHTTP splits network metadata between relay
