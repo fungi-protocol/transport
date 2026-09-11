@@ -1,0 +1,29 @@
+[package]
+name = "fungi-transport-ohttp"
+description = "Append-only OHTTP mailbox channels for Fungi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Files in tests/ are loaded by the library test module for private-state checks.
+autotests = false
+
+[dependencies]
+fungi-transport = { path = "../transport" }
+payjoin = { git = "https://github.com/0xZaddyy/rust-payjoin", rev = "7366c5082f38f31d1c8a10fe27d88e50c3bc6fd6", default-features = false, features = ["v2"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
+payjoin-mailroom = { git = "https://github.com/0xZaddyy/rust-payjoin", rev = "7366c5082f38f31d1c8a10fe27d88e50c3bc6fd6", default-features = false, features = ["_manual-tls"] }
+axum = "0.8"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+ohttp = { package = "bitcoin-ohttp", version = "0.6" }
+
+[lints]
+workspace = true
