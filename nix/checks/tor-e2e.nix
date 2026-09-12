@@ -119,13 +119,23 @@
           da1.wait_until_succeeds("curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus >/dev/null", timeout=300)
 
           # The consensus gate is >=8 of the 9 nodes (3 DAs + 6 relays), so one
-          # slow node does not fail it.
+          # slow node does not fail it. `tor.service` being active only means
+          # the process started: under runner contention, ORPort self-testing,
+          # descriptor publication, and the following vote can take more than
+          # ten minutes. Leave room for that vote, and dump the consensus on a
+          # timeout so the missing nodes are visible in CI.
           for r in [relay1, relay2, relay3, relay4, relay5, relay6]:
               r.wait_for_unit("tor.service")
-          da1.wait_until_succeeds(
-              "test $(curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus | grep -c '^r ') -ge 8",
-              timeout=600,
-          )
+          try:
+              da1.wait_until_succeeds(
+                  "test $(curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus | grep -c '^r ') -ge 8",
+                  timeout=900,
+              )
+          except Exception:
+              print("consensus at timeout:\n" + da1.succeed(
+                  "curl -s http://192.168.1.11:9030/tor/status-vote/current/consensus | grep '^r ' || true"
+              ))
+              raise
 
           # No shared-random wait: on a fresh net, before the first real SRV
           # publishes (~24 min at 1-minute voting), the consensus carries no
