@@ -4,11 +4,11 @@
 //! runs inside the process via `arti-client` — no external daemon. Each
 //! peer runs an onion service and opens streams to peer `.onion` addresses;
 //! message delimitation is the same [`fungi_transport::framing`] length-prefix
-//! layer the SOCKS5h backend uses.
+//! layer the Tor SOCKS backend uses.
 //!
 //! Entry point: [`ArtiTransport::bootstrap`] (once per peer — it is
 //! expensive), then [`ArtiTransport::connector`] and
-//! [`ArtiTransport::listen`]. Unlike the SOCKS5h backend's ephemeral
+//! [`ArtiTransport::listen`]. Unlike the Tor SOCKS backend's ephemeral
 //! onions, identity here PERSISTS: the address derives from keys stored in
 //! the configured state directory per nickname. No internal deadlines —
 //! callers own timeouts; cancelling by drop is safe, though an `accept`
@@ -23,7 +23,7 @@
 //!
 //! Circuit isolation is enforced by arti directly: an isolated connector
 //! dials with its group's stream-isolation token, so distinct groups never
-//! share a circuit — unconditionally, unlike the SOCKS5h
+//! share a circuit — unconditionally, unlike the Tor SOCKS
 //! backend, which relies on the daemon's `IsolateSOCKSAuth`. Isolation
 //! covers the dialing side; inbound rendezvous circuits are arti's to place.
 //!

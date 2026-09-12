@@ -104,7 +104,7 @@ impl Listener for ArtiListener {
             let req = self.incoming.next().await.ok_or_else(|| {
                 // The incoming stream ending means the onion service stopped
                 // producing rendezvous requests: this listener is done, not a
-                // peer being unreachable. Matches the socks5h accept side.
+                // peer being unreachable. Matches the Tor SOCKS accept side.
                 ConnectError::Transport("onion service stopped accepting connections".into())
             })?;
             match req.request() {

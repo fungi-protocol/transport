@@ -1,4 +1,4 @@
-# SOCKS5h transport as a self-contained flake-parts module: it exports a crane
+# arti transport as a self-contained flake-parts module: it exports a crane
 # build of the plugin binary the VM e2e drives as a subprocess.
 { inputs, ... }:
 {
@@ -9,10 +9,10 @@
       crane = import ../lib/crane.nix { inherit inputs system; };
     in
     {
-      packages.fungi-socks5h-plugin = crane.buildCrate {
-        pname = "fungi-socks5h-plugin";
-        crate = "fungi-transport-socks5h";
-        bin = "fungi-socks5h-plugin";
+      packages.fungi-tor-arti-plugin = crane.buildCrate {
+        pname = "fungi-tor-arti-plugin";
+        crate = "fungi-tor-arti";
+        bin = "fungi-tor-arti-plugin";
       };
     };
 }

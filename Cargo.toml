@@ -5,8 +5,8 @@ members = [
     "crates/wire",
     "crates/transport",
     "crates/transport-capnp",
-    "crates/transport-socks5h",
-    "crates/transport-arti",
+    "crates/tor-socks",
+    "crates/tor-arti",
     "crates/transport-ohttp",
 ]
 

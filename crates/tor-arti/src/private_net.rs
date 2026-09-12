@@ -4,10 +4,10 @@
 //! Line format: `authority <name> <v3ident-hex>` and
 //! `fallback <rsa-id-hex> <ed-id-base64> <ip:orport>`. `#` starts a comment.
 //!
-//! This lives in the arti backend crate (not the e2e harness) so that both the
+//! This lives in the Tor Arti crate (not the e2e harness) so that both the
 //! in-process harness path and the out-of-process arti plugin can share one
 //! parser/applier: the plugin reads the descriptor from its environment at
-//! startup and applies it before bootstrap (see the `fungi-arti-plugin`
+//! startup and applies it before bootstrap (see the `fungi-tor-arti-plugin`
 //! binary), while the harness applies it inline.
 
 use std::path::Path;

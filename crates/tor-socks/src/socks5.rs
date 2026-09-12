@@ -1,4 +1,4 @@
-//! Minimal SOCKS5h client: CONNECT with the hostname sent to the proxy
+//! Minimal SOCKS5 client: CONNECT with the hostname sent to the proxy
 //! (ATYP=domain), per RFC 1928. "h" = the proxy resolves the name; a
 //! `.onion` has no DNS entry, and resolving locally would leak it.
 
@@ -47,7 +47,7 @@ async fn authenticate(stream: &mut TcpStream, username: &str) -> Result<(), Conn
 /// and connection-refused codes (`0x03`-`0x05`) become
 /// [`ConnectError::Unreachable`]: through tor these mean the peer could not be
 /// reached (`0x01` covers a failed onion descriptor lookup or rendezvous), the
-/// consumer's cue to retry later. This matches the arti backend's classifier,
+/// consumer's cue to retry later. This matches the Tor Arti backend's classifier,
 /// so retry semantics do not depend on which backend is plugged. The remaining
 /// codes are genuine protocol/policy failures and stay opaque.
 fn classify_connect_reply(code: u8) -> Result<(), ConnectError> {
@@ -61,7 +61,7 @@ fn classify_connect_reply(code: u8) -> Result<(), ConnectError> {
 }
 
 /// Open a TCP stream to `host:port` through the SOCKS5 proxy at `proxy`.
-/// The hostname travels to the proxy unresolved (SOCKS5h).
+/// The hostname travels to the SOCKS5 proxy unresolved.
 ///
 /// `credential`, when set, drives username/password auth (RFC 1929) with that
 /// username (and a fixed password). Its only purpose is circuit isolation:

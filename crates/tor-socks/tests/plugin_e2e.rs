@@ -1,5 +1,5 @@
 //! Proves a REAL backend over the whole capnp plugin stack, deterministically:
-//! the SOCKS5h `TorTransport` runs inside the plugin subprocess, driven from
+//! the Tor SOCKS `TorTransport` runs inside the plugin subprocess, driven from
 //! here through [`connect_plugin`] over the child's stdio, with the tor daemon
 //! replaced by in-test fakes.
 //!
@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 /// The plugin binary, built by cargo before this integration test.
-const PLUGIN: &str = env!("CARGO_BIN_EXE_fungi-socks5h-plugin");
+const PLUGIN: &str = env!("CARGO_BIN_EXE_fungi-tor-socks-plugin");
 
 /// Fake tor control port good for one ADD_ONION. Answers AUTHENTICATE and
 /// ADD_ONION with a fixed `service_id`, and reports the local port carried in
@@ -58,7 +58,7 @@ async fn fake_control_once(
 
 /// Fake SOCKS5 forwarding proxy: once the listener's local port is known, serve
 /// every inbound client — do the server side of the handshake (no byte
-/// assertions; the socks5h crate owns those) and splice it to a fresh
+/// assertions; the Tor SOCKS crate owns those) and splice it to a fresh
 /// connection to `127.0.0.1:<local_port>`.
 async fn fake_socks_forwarding(listener: TcpListener, port_rx: oneshot::Receiver<u16>) {
     let local_port = port_rx
@@ -96,10 +96,10 @@ async fn fake_socks_forwarding(listener: TcpListener, port_rx: oneshot::Receiver
 }
 
 /// The crown-jewel test: connector -> fake SOCKS (forwarding) -> the plugin's
-/// own onion-service local port, with the whole SOCKS5h `TorTransport` living
+/// own onion-service local port, with the whole Tor SOCKS `TorTransport` living
 /// inside the subprocess and every hop crossing capnp over its stdio.
 #[tokio::test]
-async fn socks5h_plugin_roundtrip_through_fakes() {
+async fn tor_socks_plugin_roundtrip_through_fakes() {
     let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_addr = control.local_addr().unwrap();
     let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();

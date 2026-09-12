@@ -1,4 +1,4 @@
-# arti transport as a self-contained flake-parts module: it exports a crane
+# Tor SOCKS transport as a self-contained flake-parts module: it exports a crane
 # build of the plugin binary the VM e2e drives as a subprocess.
 { inputs, ... }:
 {
@@ -9,10 +9,10 @@
       crane = import ../lib/crane.nix { inherit inputs system; };
     in
     {
-      packages.fungi-arti-plugin = crane.buildCrate {
-        pname = "fungi-arti-plugin";
-        crate = "fungi-transport-arti";
-        bin = "fungi-arti-plugin";
+      packages.fungi-tor-socks-plugin = crane.buildCrate {
+        pname = "fungi-tor-socks-plugin";
+        crate = "fungi-tor-socks";
+        bin = "fungi-tor-socks-plugin";
       };
     };
 }

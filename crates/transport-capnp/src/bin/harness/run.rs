@@ -485,10 +485,10 @@ async fn shutdown_gossip(node: GossipBroadcast) -> Result<(), String> {
 /// Backend configuration is delivered two ways, and each backend uses only what
 /// it needs. Directory config goes through the environment: `--state-dir` sets
 /// `FUNGI_STATE_DIR` and, unless `--cache-dir` overrides it, `FUNGI_CACHE_DIR`
-/// for arti's persistent state and cache (socks5h ignores them). The private test network goes through the plugin's
+/// for Arti's persistent state and cache (Tor SOCKS ignores them). The private test network goes through the plugin's
 /// `TestFixtures.configurePrivateNet` capability instead — `--private-net` is
 /// read here and installed before the transport is first driven, since arti must
-/// fix its authorities before its one bootstrap; socks5h treats it as a no-op.
+/// fix its authorities before its one bootstrap; Tor SOCKS treats it as a no-op.
 pub(crate) async fn run(cli: Cli) -> Result<(), String> {
     use fungi_transport::OnionAddr;
     use fungi_transport_capnp::{CapnpTransport, connect_plugin};
@@ -638,7 +638,7 @@ mod tests {
                 "fungi-harness",
                 "listen",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-arti-plugin",
+                "/nix/store/xxx/bin/fungi-tor-arti-plugin",
                 "--virt-port",
                 "9735",
             ]
@@ -648,7 +648,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cli.plugin,
-            std::path::Path::new("/nix/store/xxx/bin/fungi-arti-plugin")
+            std::path::Path::new("/nix/store/xxx/bin/fungi-tor-arti-plugin")
         );
     }
 
@@ -661,7 +661,7 @@ mod tests {
                 "fungi-harness",
                 "dial",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "/nix/store/xxx/bin/fungi-tor-socks-plugin",
                 "--circuit-isolation",
                 sess,
                 &format!("{:a<56}.onion:9735", "host"),
@@ -689,7 +689,7 @@ mod tests {
                 "fungi-harness",
                 "dial",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "/nix/store/xxx/bin/fungi-tor-socks-plugin",
                 &format!("{:a<56}.onion:9735", "host"),
             ]
             .map(String::from)
@@ -713,7 +713,7 @@ mod tests {
                 "fungi-harness",
                 "gossip",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-arti-plugin",
+                "/nix/store/xxx/bin/fungi-tor-arti-plugin",
                 "--virt-port",
                 "9736",
                 "--listen-peers",
@@ -784,7 +784,7 @@ mod tests {
                 "fungi-harness",
                 "gossip",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "/nix/store/xxx/bin/fungi-tor-socks-plugin",
                 "--dial",
                 &onion,
                 "--protocol-session",
@@ -824,7 +824,7 @@ mod tests {
                 "fungi-harness",
                 "dial",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-socks5h-plugin",
+                "/nix/store/xxx/bin/fungi-tor-socks-plugin",
                 "--private-net",
                 "/tmp/private-net",
                 "--state-dir",
@@ -857,7 +857,7 @@ mod tests {
                 "fungi-harness",
                 "dial",
                 "--plugin",
-                "/nix/store/xxx/bin/fungi-arti-plugin",
+                "/nix/store/xxx/bin/fungi-tor-arti-plugin",
                 "--state-dir",
                 "/tmp/arti-dial",
                 "--cache-dir",

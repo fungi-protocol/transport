@@ -1,5 +1,5 @@
 //! Conformance suite for [`Channel`] and [`BroadcastChannel`] implementations.
-//! Any transport (in-memory, SOCKS5h, arti, OHTTP mailbox) must pass these;
+//! Any transport (in-memory, Tor SOCKS, Tor Arti, OHTTP mailbox) must pass these;
 //! the P2P items take a freshly connected pair, the broadcast items a group.
 //! Ordering is deliberately NOT asserted — the trait promises none.
 //!

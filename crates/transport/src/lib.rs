@@ -44,8 +44,8 @@
 //! stores messages for later retrieval. Both models satisfy the same
 //! message-oriented [`Channel`] contract.
 //!
-//! Real transports live in their own crates: `fungi-transport-socks5h`
-//! (external tor daemon), `fungi-transport-arti` (in-process arti), and
+//! Real transports live in their own crates: `fungi-tor-socks`
+//! (external tor daemon), `fungi-tor-arti` (in-process arti), and
 //! `fungi-transport-ohttp` (append-only OHTTP mailboxes).
 
 pub mod addr;

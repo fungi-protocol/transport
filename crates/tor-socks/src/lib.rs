@@ -1,7 +1,7 @@
 //! Interactive channel backend over an external tor daemon.
 //!
 //! The daemon does all Tor work; this crate speaks two local protocols to
-//! it: SOCKS5h on the socks port to open streams to `.onion` peers (the
+//! it: SOCKS5 on the SOCKS port to open streams to `.onion` peers (the
 //! proxy resolves the hostname — resolving locally would fail and leak the
 //! address to DNS), and the control port to publish an onion service that
 //! forwards inbound connections to a local TCP listener.
@@ -72,7 +72,7 @@ impl Default for TorConfig {
     }
 }
 
-/// Opens channels to `.onion` peers through the daemon's SOCKS5h proxy.
+/// Opens channels to `.onion` peers through the daemon's SOCKS5 proxy.
 ///
 /// A connector bound to a circuit-isolation group (via
 /// [`fungi_transport::Transport::isolated_connector`])
@@ -149,7 +149,7 @@ impl Connector for TorConnector {
     }
 }
 
-/// A [`Transport`] over a tor daemon: SOCKS5h connectors and ephemeral onion
+/// A [`Transport`] over a tor daemon: SOCKS5 connectors and ephemeral onion
 /// listeners.
 #[derive(Debug, Clone)]
 pub struct TorTransport {
@@ -185,7 +185,7 @@ impl Transport for TorTransport {
     {
         let cfg = self.cfg.clone();
         async move {
-            // SOCKS5h onions are ephemeral (DiscardPK); the nickname hint is unused.
+            // Tor SOCKS onions are ephemeral (DiscardPK); the nickname hint is unused.
             let listener = TorListener::bind(&cfg, params.virt_port).await?;
             let addr = listener.onion_addr().clone();
             Ok((listener, addr))

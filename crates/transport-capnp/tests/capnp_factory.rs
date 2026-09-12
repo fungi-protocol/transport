@@ -69,7 +69,7 @@ async fn factory_roundtrip_over_capnp() {
 /// ISOLATION: an isolated connector traverses `isolatedConnector` across capnp
 /// and dials end to end, exactly like the default connector — proving the
 /// isolation id crosses the plugin boundary and the remote method is wired.
-/// (The mem backend cannot show real circuit isolation; the socks5h/arti
+/// (The mem backend cannot show real circuit isolation; the Tor SOCKS/Arti
 /// crates prove the credential/token derivation.)
 #[tokio::test]
 async fn isolated_connector_roundtrip_over_capnp() {

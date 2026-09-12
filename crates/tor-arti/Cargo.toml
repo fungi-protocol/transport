@@ -1,5 +1,5 @@
 [package]
-name = "fungi-transport-arti"
+name = "fungi-tor-arti"
 description = "Arti (in-process Tor) backend for the fungi P2P datagram channel"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 fungi-transport = { path = "../transport" }
 # The backend crate also ships the capnp plugin binary
-# (src/bin/fungi-arti-plugin.rs), which bootstraps arti and exposes this
+# (src/bin/fungi-tor-arti-plugin.rs), which bootstraps arti and exposes this
 # backend over the capnp plugin protocol on its own stdio.
 fungi-transport-capnp = { path = "../transport-capnp" }
 # `rt`/`io-std` for the plugin binary's current-thread runtime + stdio server.
@@ -29,7 +29,7 @@ arti-client = { version = "=0.45.0", default-features = false, features = [
     # experimental-api NOT required for onion-service-client/-service on 0.45.0 (verified Task 1)
 ] }
 # Pinned to match arti-client's own dependency tree (verified via
-# `cargo tree -p fungi-transport-arti | grep -E "tor-hsservice|tor-cell"`).
+# `cargo tree -p fungi-tor-arti | grep -E "tor-hsservice|tor-cell"`).
 tor-hsservice = "=0.45.0"
 tor-cell = "=0.45.0"
 # `TorClient<R>` is generic over the runtime and arti-client does not

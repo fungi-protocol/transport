@@ -16,8 +16,8 @@
       # The VM test and each transport are their own flake-parts modules.
       imports = [
         ./nix/checks/tor-e2e.nix
-        ./nix/transports/socks5h.nix
-        ./nix/transports/arti.nix
+        ./nix/transports/tor-socks.nix
+        ./nix/transports/tor-arti.nix
       ];
       perSystem = { system, ... }:
         let

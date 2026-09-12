@@ -17,7 +17,7 @@ use tor_rtcompat::PreferredRuntime;
 
 use crate::error::connect_error;
 
-/// Knobs for the in-process arti backend.
+/// Knobs for the in-process Tor Arti backend.
 #[derive(Debug, Clone)]
 pub struct ArtiConfig {
     /// Directory for arti's persistent state (incl. onion-service keys —

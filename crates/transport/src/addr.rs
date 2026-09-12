@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 /// Transport-native address of a tor peer: a v3 `.onion` hostname and port,
 /// obtained out of band, opaque to consumers. Shared by every Tor backend
-/// (the SOCKS5h daemon backend and the in-process arti backend).
+/// (the external-daemon Tor SOCKS backend and the in-process Tor Arti backend).
 ///
 /// Construction validates the v3 textual form (`<56 base32 chars>.onion`),
 /// so a held `OnionAddr` is always shaped like a real onion address. Only

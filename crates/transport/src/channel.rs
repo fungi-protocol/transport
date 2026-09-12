@@ -47,7 +47,7 @@ use crate::sender::SenderId;
 ///
 /// A connected pair exchanging messages in both directions, using the
 /// in-memory implementation ([`crate::mem`]) that any real transport
-/// (SOCKS5h, arti, an OHTTP mailbox) must behave like:
+/// (Tor SOCKS, Tor Arti, an OHTTP mailbox) must behave like:
 ///
 /// ```
 /// use fungi_transport::Channel;
@@ -424,7 +424,7 @@ pub struct ListenParams {
     /// Identity hint, interpreted per backend. A backend with persistent
     /// identities (arti) loads or creates the identity stored under this
     /// nickname, falling back to a fixed default nickname when `None`. A
-    /// backend with only ephemeral identities (the SOCKS5h DiscardPK onion)
+    /// backend with only ephemeral identities (the Tor SOCKS DiscardPK onion)
     /// ignores the hint and publishes a fresh identity per listener. `None`
     /// therefore does NOT guarantee an ephemeral identity.
     pub nickname: Option<String>,

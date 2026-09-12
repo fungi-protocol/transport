@@ -21,7 +21,7 @@ fn sequence() -> Vec<Vec<u8>> {
 /// on a plain TCP/SOCKS stream) or as
 /// [`RecvError::Transport`](crate::error::RecvError::Transport): a real Tor
 /// onion stream is torn down with an END
-/// cell, which the arti backend reports as a transport error (e.g. END reason
+/// cell, which the Tor Arti backend reports as a transport error (e.g. END reason
 /// MISC maps to `io::ErrorKind::Other`) rather than a clean EOF. Either way the
 /// peer is gone. Data correctness is the dialer's job ([`dial_sequence`] checks
 /// every echo), so the echo server only has to serve one peer until it leaves.

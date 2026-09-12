@@ -1,4 +1,4 @@
-//! A capnp plugin process backed by the SOCKS5h tor-daemon backend.
+//! A capnp plugin process backed by an external Tor daemon over SOCKS5.
 //!
 //! It speaks the server side of the plugin protocol over its own stdin/stdout,
 //! so a harness can drive it through
@@ -11,8 +11,8 @@
 
 use std::net::SocketAddr;
 
+use fungi_tor_socks::{TorConfig, TorTransport};
 use fungi_transport_capnp::serve_plugin_stdio;
-use fungi_transport_socks5h::{TorConfig, TorTransport};
 
 /// Read a `SocketAddr` from `var`, falling back to `default` when unset. A set
 /// but unparseable value is a hard error: a misconfigured daemon address must

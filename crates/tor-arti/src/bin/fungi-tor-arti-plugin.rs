@@ -24,8 +24,8 @@
 
 use std::path::PathBuf;
 
+use fungi_tor_arti::LazyArtiTransport;
 use fungi_transport::framing::DEFAULT_MAX_MSG_LEN;
-use fungi_transport_arti::LazyArtiTransport;
 use fungi_transport_capnp::{PluginFixtures, serve_plugin_with_stdio};
 
 /// Read a directory path from `var`, falling back to `<temp>/default_leaf`.

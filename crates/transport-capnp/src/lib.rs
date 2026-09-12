@@ -1523,7 +1523,7 @@ pub trait PluginFixtures {
 }
 
 /// A [`PluginFixtures`] that does nothing: the default for backends whose test
-/// network is set up out of band (e.g. socks5h, whose private Tor net is the
+/// network is set up out of band (e.g. Tor SOCKS, whose private Tor net is the
 /// system daemon's torrc, or the in-memory backend).
 #[derive(Debug)]
 pub struct NoopFixtures;

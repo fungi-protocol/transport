@@ -2009,17 +2009,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fungi-transport"
-version = "0.1.0"
-dependencies = [
- "futures-core",
- "futures-util",
- "proptest",
- "tokio",
-]
-
-[[package]]
-name = "fungi-transport-arti"
+name = "fungi-tor-arti"
 version = "0.1.0"
 dependencies = [
  "arti-client",
@@ -2035,6 +2025,26 @@ dependencies = [
  "tor-proto",
  "tor-rtcompat",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fungi-tor-socks"
+version = "0.1.0"
+dependencies = [
+ "fungi-transport",
+ "fungi-transport-capnp",
+ "proptest",
+ "tokio",
+]
+
+[[package]]
+name = "fungi-transport"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "proptest",
+ "tokio",
 ]
 
 [[package]]
@@ -2070,16 +2080,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "fungi-transport-socks5h"
-version = "0.1.0"
-dependencies = [
- "fungi-transport",
- "fungi-transport-capnp",
- "proptest",
- "tokio",
 ]
 
 [[package]]
